@@ -134,7 +134,7 @@ export default function App() {
 
         {/* Charts */}
         {history.length > 0 && (
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'1rem' }}>
+          <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap:'1rem' }}>
             <Chart data={history} dataKey="aqi"        color="#38bdf8" label="AQI over time" />
             <Chart data={history} dataKey="nano_index" color="#a78bfa" label="Nano index over time" />
           </div>
