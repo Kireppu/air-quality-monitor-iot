@@ -38,6 +38,7 @@ export default function App() {
   const [current,  setCurrent]  = useState(null)
   const [history,  setHistory]  = useState([])
   const [lastSeen, setLastSeen] = useState(null)
+  const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
 
   // Listen to current reading (live)
   useEffect(() => {
@@ -62,6 +63,12 @@ export default function App() {
         setHistory(entries)
       }
     })
+  }, [])
+
+  useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
   }, [])
 
   const aqi      = current ? Math.round(current.aqi) : null
