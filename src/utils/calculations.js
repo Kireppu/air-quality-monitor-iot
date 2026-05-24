@@ -1,3 +1,15 @@
+// MQ-2 ADC → percentage + level
+export function getSmokeLevel(adcRaw) {
+  const pct = Math.round((adcRaw / 1023) * 100)
+  let label, color
+  if (pct < 20)       { label = 'Clean';    color = '#22c55e' }
+  else if (pct < 40)  { label = 'Low';      color = '#86efac' }
+  else if (pct < 60)  { label = 'Moderate'; color = '#eab308' }
+  else if (pct < 80)  { label = 'High';     color = '#f97316' }
+  else                { label = 'Danger';   color = '#ef4444' }
+  return { pct, label, color }
+}
+
 // ─── AQI Level Labels ────────────────────────────────────────────────────────
 export function getAQILevel(aqi) {
   if (aqi <= 50)  return { label: 'Good',                            color: '#22c55e' }
