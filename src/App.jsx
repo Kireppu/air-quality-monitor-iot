@@ -5,12 +5,8 @@ import {
   LineChart, Line, XAxis, YAxis,
   Tooltip, ResponsiveContainer, CartesianGrid
 } from 'recharts'
-import {
-  getAQILevel, getNanoLevel,
-  predictNext, rollingAQI,
-  adcToCOppm
-} from './utils/calculations'
-
+import { getAQILevel, getNanoLevel, predictNext,
+         rollingAQI, adcToCOppm, getSmokeLevel } from './utils/calculations'
 // ─── Metric Card ─────────────────────────────────────────────────────────────
 function MetricCard({ label, value, unit, color }) {
   return (
@@ -122,6 +118,7 @@ export default function App() {
   const nanoLevel  = nano ? getNanoLevel(nano) : null
   const prediction = predictNext(history, 'nano_index')
   const coPpm      = current ? adcToCOppm(current.co) : null
+  const smoke      = current ? getSmokeLevel(current.smoke) : null
 
   // ─── Render ─────────────────────────────────────────────────────
   return (
@@ -174,6 +171,11 @@ export default function App() {
               <div style={{ fontSize: '.85rem', color: '#94a3b8', marginTop: '.15rem' }}>
                 Rolling AQI {aqi} · Nano Index {nano} ({nanoLevel?.label})
               </div>
+              {smoke && smoke.pct >= 60 && (
+                <div style={{ fontSize: '.78rem', color: smoke.color, marginTop: '.2rem' }}>
+                  🔥 Smoke / gas detected — {smoke.label} ({smoke.pct}%)
+                </div>
+              )}
             </div>
 
             {/* Prediction */}
@@ -243,6 +245,12 @@ export default function App() {
             value={coPpm}
             unit="ppm (est.)"
             color="#f472b6"
+          />
+          <MetricCard
+          label="Smoke / Gas"
+          value={smoke ? smoke.pct + '%' : '--'}
+          unit={smoke ? smoke.label : 'MQ-2 sensor'}
+          color={smoke?.color}
           />
         </div>
 
