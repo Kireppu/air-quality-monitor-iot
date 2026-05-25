@@ -68,7 +68,7 @@ function MetricCard({ sensor, value, stats }) {
   )
 }
 
-function SensorChart({ data, sensor, forecastPoints = [] }) {
+function SensorChart({ data, sensor, forecastPoints = [], startIndex, endIndex, onBrushChange }) {
   const combined = useMemo(() => {
     if (forecastPoints.length === 0) return data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
     const hist = data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
@@ -80,12 +80,7 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
 
   return (
     <div style={{ background: T.bg2, borderRadius: 10, padding: '1rem', border: `1px solid ${T.border}` }}>
-      <div style={{ fontSize: '.78rem', color: T.textSub, marginBottom: '.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <span>{sensor.label} <span style={{ color: T.textMuted }}>({sensor.chartUnit})</span></span>
-        {forecastPoints.length > 0 && <span style={{ fontSize: '.7rem', color: T.purple }}>— actual &nbsp;··· forecast</span>}
-      </div>
-      
-      {/* 👇 Height increased to 190px to comfortably fit the zoom slider */}
+      {/* ... (your header logic) */}
       <ResponsiveContainer width="100%" height={190}>
         <ComposedChart data={combined} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
@@ -95,14 +90,16 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
           <Line type="monotone" dataKey="actual" stroke={sensor.color} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
           {forecastPoints.length > 0 && <Line type="monotone" dataKey="forecast" stroke={T.purple} strokeWidth={1.5} strokeDasharray="6 3" dot={false} isAnimationActive={false} connectNulls />}
           
-          {/* 👇 THE NEW ZOOM & SCROLL SLIDER */}
+          {/* CONTROLLED BRUSH */}
           <Brush 
             dataKey="time" 
             height={20} 
             stroke={T.borderBright} 
             fill={T.bg1} 
-            travellerWidth={14} 
-            tickFormatter={() => ''} 
+            travellerWidth={14}
+            startIndex={startIndex}
+            endIndex={endIndex}
+            onChange={onBrushChange} 
           />
         </ComposedChart>
       </ResponsiveContainer>
@@ -161,6 +158,9 @@ export default function App() {
   const [lastSeen, setLastSeen] = useState(null)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
   const [tab, setTab] = useState('dashboard')
+  const [brushIdx, setBrushIdx] = useState({ start: 0, end: undefined });
+  const handleBrushChange = (range) => {
+  setBrushIdx({ start: range.startIndex, end: range.endIndex });
 
   // ML States
   const [tfForecast, setTfForecast] = useState(null)
@@ -381,7 +381,16 @@ export default function App() {
             {history.length > 0 ? (
               <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1rem' }}>
                 {SENSORS.map(s => (
-                  <SensorChart key={s.key} data={transformedHistory} sensor={s} forecastPoints={s.key === 'nano_index' ? (tfForecast || []) : []} />
+                  <SensorChart 
+                    key={s.key} 
+                    data={transformedHistory} 
+                    sensor={s} 
+                    forecastPoints={s.key === 'nano_index' ? (tfForecast || []) : []}
+                    // 👈 Connect the state and handler here:
+                    startIndex={brushIdx.start}
+                    endIndex={brushIdx.end}
+                    onBrushChange={handleBrushChange}
+                  />
                 ))}
               </div>
             ) : (
