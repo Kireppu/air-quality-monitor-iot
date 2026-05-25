@@ -1,103 +1,475 @@
-import { useEffect, useState }          from 'react'
-import { ref, onValue, query, limitToLast } from 'firebase/database'
-import { db }                           from './firebase'
-import { LineChart, Line, XAxis, YAxis,
-         Tooltip, ResponsiveContainer, CartesianGrid} from 'recharts'
-import { getAQILevel, getNanoLevel, predictNext,
-         adcToCOppm, getSmokeLevel } from './utils/calculations'
-// ─── Metric Card ─────────────────────────────────────────────────────────────
-function MetricCard({ label, value, unit, color }) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  App.jsx  ·  Smart Air Quality Monitor — Enhanced Dashboard
+//  Features: Timeline Forecast · Health Advisories · All-Sensor Charts
+//            Session Analytics · Anomaly Detection · CSV Export
+// ─────────────────────────────────────────────────────────────────────────────
+import { useEffect, useState, useMemo, useCallback } from 'react'
+import { ref, onValue, query, limitToLast }           from 'firebase/database'
+import { db }                                          from './firebase'
+import {
+  ComposedChart, LineChart, Line, Area, XAxis, YAxis,
+  Tooltip, ResponsiveContainer, CartesianGrid
+} from 'recharts'
+import {
+  getAQILevel, getNanoLevel, predictNext, adcToCOppm, getSmokeLevel,
+  forecastTimeline, getHealthRecommendations, detectAnomaly,
+  getSensorStats, generateCSV
+} from './utils/calculations'
+
+// ─── Design Tokens ───────────────────────────────────────────────────────────
+const T = {
+  bg0: '#060c16', bg1: '#0a1522', bg2: '#0f1d30', bg3: '#152540',
+  border: '#1b3253', borderMid: '#224070', borderBright: '#2d5490',
+  text: '#cce0ff', textSub: '#5a80aa', textMuted: '#2d4d6e',
+  cyan: '#06b6d4', purple: '#a78bfa', amber: '#f59e0b',
+  red: '#ef4444', green: '#10b981', orange: '#f97316', pink: '#f472b6',
+  teal: '#14b8a6', blue: '#38bdf8', yellow: '#facc15',
+}
+
+// ─── Sensor Configuration ────────────────────────────────────────────────────
+// `key` matches the transformed history field
+const SENSORS = [
+  { key: 'aqi',         label: 'AQI',          unit: '',       chartUnit: 'Index',   color: T.cyan,   fmt: v => Math.round(v)        },
+  { key: 'nano_index',  label: 'Nano Index',    unit: '',       chartUnit: 'Index',   color: T.purple, fmt: v => Math.round(v)        },
+  { key: 'pm25_ug',     label: 'PM2.5',         unit: 'µg/m³', chartUnit: 'µg/m³',  color: T.blue,   fmt: v => (+v).toFixed(1)      },
+  { key: 'temperature', label: 'Temperature',   unit: '°C',    chartUnit: '°C',     color: T.orange, fmt: v => (+v).toFixed(1)      },
+  { key: 'humidity',    label: 'Humidity',      unit: '% RH',  chartUnit: '%',      color: T.green,  fmt: v => (+v).toFixed(1)      },
+  { key: 'co_ppm',      label: 'CO (MQ-7)',     unit: 'ppm',   chartUnit: 'ppm',    color: T.pink,   fmt: v => (+v).toFixed(1)      },
+  { key: 'smoke_pct',   label: 'Smoke / Gas',   unit: '%',     chartUnit: '%',      color: T.amber,  fmt: v => Math.round(v) + '%'  },
+]
+
+const SEV = {
+  good:     { bg: '#10b98114', border: '#10b98140', text: '#10b981' },
+  info:     { bg: '#06b6d414', border: '#06b6d440', text: '#06b6d4' },
+  warning:  { bg: '#f59e0b14', border: '#f59e0b40', text: '#f59e0b' },
+  danger:   { bg: '#f9731614', border: '#f9731640', text: '#f97316' },
+  critical: { bg: '#ef444414', border: '#ef444440', text: '#ef4444' },
+}
+
+// ─── Shared Tooltip Style ────────────────────────────────────────────────────
+const TT = {
+  contentStyle: {
+    background: T.bg0, border: `1px solid ${T.border}`,
+    color: T.text, borderRadius: 8, fontSize: '.78rem'
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MetricCard
+// ─────────────────────────────────────────────────────────────────────────────
+function MetricCard({ sensor, value, stats }) {
+  const trendColor = !stats ? T.textSub
+    : stats.trend === 'rising'  ? T.red
+    : stats.trend === 'falling' ? T.green
+    : T.textSub
+  const arrow = !stats ? '→'
+    : stats.trend === 'rising'  ? '↑'
+    : stats.trend === 'falling' ? '↓' : '→'
+
   return (
     <div style={{
-      background: '#1e293b', borderRadius: 12, padding: '1.2rem',
-      border: '1px solid #334155', textAlign: 'center'
+      background: T.bg2, borderRadius: 10, padding: '1rem',
+      border: `1px solid ${T.border}`, position: 'relative', overflow: 'hidden'
     }}>
-      <div style={{ fontSize: '.75rem', color: '#94a3b8', marginBottom: '.3rem' }}>
-        {label}
+      {/* Top accent glow */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0, height: 2,
+        background: `linear-gradient(90deg, transparent, ${sensor.color}aa, transparent)`
+      }} />
+      <div style={{
+        fontSize: '.67rem', color: T.textSub, letterSpacing: '.1em',
+        textTransform: 'uppercase', marginBottom: '.45rem'
+      }}>
+        {sensor.label}
       </div>
-      <div style={{ fontSize: '2rem', fontWeight: 700, color: color || '#e2e8f0' }}>
-        {value ?? '--'}
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '.3rem' }}>
+        <span style={{
+          fontSize: '2rem', fontWeight: 700, color: sensor.color,
+          fontFamily: '"JetBrains Mono", monospace', lineHeight: 1
+        }}>
+          {value != null ? sensor.fmt(value) : '--'}
+        </span>
+        {sensor.unit && (
+          <span style={{ fontSize: '.7rem', color: T.textSub }}>{sensor.unit}</span>
+        )}
       </div>
-      <div style={{ fontSize: '.78rem', color: '#64748b' }}>
-        {unit}
-      </div>
+      {stats && (
+        <div style={{
+          fontSize: '.66rem', color: T.textMuted, marginTop: '.5rem',
+          display: 'flex', gap: '.8rem', alignItems: 'center'
+        }}>
+          <span>↓ {stats.min}</span>
+          <span>∅ {stats.avg}</span>
+          <span>↑ {stats.max}</span>
+          <span style={{ marginLeft: 'auto', color: trendColor }}>
+            {arrow} {Math.abs(stats.trendPct)}%
+          </span>
+        </div>
+      )}
     </div>
   )
 }
 
-// ─── Chart ───────────────────────────────────────────────────────────────────
-function Chart({ data, dataKey, color, label }) {
+// ─────────────────────────────────────────────────────────────────────────────
+//  SensorChart  — used in "All Sensors" tab, optionally with forecast overlay
+// ─────────────────────────────────────────────────────────────────────────────
+function SensorChart({ data, sensor, forecastPoints = [] }) {
+  const combined = useMemo(() => {
+    if (forecastPoints.length === 0)
+      return data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
+
+    const hist = data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
+    if (hist.length === 0) return hist
+
+    // Bridge: last real point starts the dashed line
+    const bridge = { ...hist[hist.length - 1], forecast: hist[hist.length - 1].actual }
+    const fpts   = forecastPoints.map(f => ({ time: `+${f.step}`, actual: null, forecast: f.value }))
+    return [...hist, bridge, ...fpts]
+  }, [data, sensor.key, forecastPoints])
+
   return (
     <div style={{
-      background: '#1e293b', borderRadius: 12, padding: '1rem',
-      border: '1px solid #334155'
+      background: T.bg2, borderRadius: 10, padding: '1rem',
+      border: `1px solid ${T.border}`
     }}>
-      <div style={{ fontSize: '.85rem', color: '#94a3b8', marginBottom: '.8rem' }}>
-        {label}
+      <div style={{
+        fontSize: '.78rem', color: T.textSub, marginBottom: '.5rem',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center'
+      }}>
+        <span>{sensor.label} <span style={{ color: T.textMuted }}>({sensor.chartUnit})</span></span>
+        {forecastPoints.length > 0 && (
+          <span style={{ fontSize: '.7rem', color: T.purple }}>— actual &nbsp;··· forecast</span>
+        )}
       </div>
-      <ResponsiveContainer width="100%" height={180}>
-        <LineChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+      <ResponsiveContainer width="100%" height={155}>
+        <ComposedChart data={combined} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
           <XAxis
             dataKey="time"
-            tick={{ fill: '#64748b', fontSize: 10 }}
-            interval={Math.max(0, Math.floor(data.length / 5))}
-            tickFormatter={(val) => val.replace(':00', '')}
+            tick={{ fill: T.textMuted, fontSize: 9 }}
+            interval="preserveStartEnd"
+            tickLine={false}
           />
-          <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-          <Tooltip
-            contentStyle={{
-              background: '#0f172a',
-              border: '1px solid #334155',
-              color: '#e2e8f0',
-              borderRadius: 8
-            }}
-          />
+          <YAxis tick={{ fill: T.textMuted, fontSize: 9 }} width={36} tickLine={false} />
+          <Tooltip {...TT} />
           <Line
-            type="monotone"
-            dataKey={dataKey}
-            stroke={color}
-            strokeWidth={2}
-            dot={false}
-            isAnimationActive={false}
+            type="monotone" dataKey="actual"
+            stroke={sensor.color} strokeWidth={2}
+            dot={false} isAnimationActive={false} connectNulls={false}
           />
-        </LineChart>
+          {forecastPoints.length > 0 && (
+            <Line
+              type="monotone" dataKey="forecast"
+              stroke={T.purple} strokeWidth={1.5} strokeDasharray="6 3"
+              dot={{ r: 2, fill: T.purple }} isAnimationActive={false} connectNulls
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </div>
   )
 }
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+//  ForecastPanel  — full-width timeline prediction for Nano Index
+// ─────────────────────────────────────────────────────────────────────────────
+function ForecastPanel({ history }) {
+  const forecasts = useMemo(() => forecastTimeline(history, 'nano_index', 6), [history])
+
+  const chartData = useMemo(() => {
+    if (history.length < 5 || forecasts.length === 0) return []
+    const past = history.slice(-12).map(d => ({
+      time: d.time,
+      actual:   +Number(d.nano_index).toFixed(1),
+      forecast: null, upper: null, lower: null
+    }))
+    const bridge = {
+      time: past[past.length - 1]?.time,
+      actual:   past[past.length - 1]?.actual,
+      forecast: past[past.length - 1]?.actual,
+      upper:    past[past.length - 1]?.actual,
+      lower:    past[past.length - 1]?.actual,
+    }
+    const fpts = forecasts.map(f => ({
+      time: `+${f.step}`, actual: null,
+      forecast: f.value, upper: f.upper, lower: f.lower
+    }))
+    return [...past, bridge, ...fpts]
+  }, [history, forecasts])
+
+  if (chartData.length === 0 || forecasts.length === 0) return (
+    <div style={{
+      background: T.bg2, borderRadius: 12, padding: '2rem',
+      border: `1px solid ${T.border}`, textAlign: 'center', color: T.textSub
+    }}>
+      📡 Need at least 5 readings to generate a forecast
+    </div>
+  )
+
+  const lastNano      = history[history.length - 1]?.nano_index ?? 0
+  const finalForecast = forecasts[forecasts.length - 1]
+  const overallTrend  = finalForecast.value > lastNano + 2
+    ? 'rising' : finalForecast.value < lastNano - 2 ? 'falling' : 'stable'
+  const trendColor    = overallTrend === 'rising' ? T.red : overallTrend === 'falling' ? T.green : T.textSub
+
+  return (
+    <div style={{
+      background: T.bg2, borderRadius: 12, padding: '1.2rem 1.4rem',
+      border: `1px solid ${T.border}`, marginBottom: '1.2rem'
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '.9rem' }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: '1rem', color: T.text }}>
+            🔮 Nano Index Forecast
+          </div>
+          <div style={{ fontSize: '.73rem', color: T.textSub, marginTop: '.2rem' }}>
+            Linear regression · next 6 readings (each step ≈ 2 s sensor interval)
+          </div>
+        </div>
+        <div style={{ textAlign: 'right' }}>
+          <div style={{
+            fontSize: '1.8rem', fontWeight: 700, color: T.purple,
+            fontFamily: '"JetBrains Mono", monospace', lineHeight: 1
+          }}>
+            {finalForecast.value}
+          </div>
+          <div style={{ fontSize: '.72rem', color: trendColor, marginTop: '.15rem' }}>
+            {overallTrend === 'rising'  ? '↑ Rising trend'
+           : overallTrend === 'falling' ? '↓ Falling trend'
+           :                              '→ Stable trend'}
+          </div>
+        </div>
+      </div>
+
+      {/* Chart: past (solid cyan) + forecast (dashed purple) */}
+      <ResponsiveContainer width="100%" height={200}>
+        <ComposedChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
+          <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} interval="preserveStartEnd" tickLine={false} />
+          <YAxis tick={{ fill: T.textMuted, fontSize: 10 }} width={36} tickLine={false} />
+          <Tooltip {...TT} />
+          {/* Confidence band: two overlapping areas */}
+          <Area type="monotone" dataKey="upper" fill="rgba(167,139,250,0.10)" stroke="none" isAnimationActive={false} />
+          <Area type="monotone" dataKey="lower" fill={T.bg2} stroke="none" isAnimationActive={false} />
+          {/* Actual readings */}
+          <Line type="monotone" dataKey="actual" stroke={T.cyan} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
+          {/* Projected readings */}
+          <Line type="monotone" dataKey="forecast" stroke={T.purple} strokeWidth={2} strokeDasharray="6 3"
+            dot={{ r: 3, fill: T.purple, strokeWidth: 0 }} isAnimationActive={false} connectNulls />
+        </ComposedChart>
+      </ResponsiveContainer>
+
+      {/* Step cards */}
+      <div style={{ display: 'flex', gap: '.5rem', marginTop: '.9rem', flexWrap: 'wrap' }}>
+        {forecasts.map((f) => {
+          const level = getNanoLevel(f.value)
+          return (
+            <div key={f.step} style={{
+              flex: '1 1 70px', background: T.bg3, borderRadius: 8,
+              padding: '.55rem .4rem', textAlign: 'center',
+              border: `1px solid ${T.border}`,
+              borderTop: `2px solid ${level.color}`
+            }}>
+              <div style={{ fontSize: '.62rem', color: T.textSub, marginBottom: '.15rem' }}>+{f.step}</div>
+              <div style={{
+                fontSize: '1.05rem', fontWeight: 700, color: level.color,
+                fontFamily: '"JetBrains Mono", monospace'
+              }}>{f.value}</div>
+              <div style={{ fontSize: '.58rem', color: T.textMuted, marginTop: '.1rem' }}>{level.label}</div>
+              <div style={{ fontSize: '.58rem', color: T.textMuted, marginTop: '.1rem' }}>
+                {f.lower}–{f.upper}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: '1.2rem', marginTop: '.8rem', fontSize: '.72rem', color: T.textSub }}>
+        <span><span style={{ color: T.cyan }}>—</span> Actual readings</span>
+        <span><span style={{ color: T.purple }}>···</span> Projected</span>
+        <span><span style={{ color: 'rgba(167,139,250,0.4)' }}>▓</span> 90% confidence band</span>
+        <span style={{ marginLeft: 'auto', color: T.textMuted }}>Values in 0–500 scale</span>
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  HealthPanel  — dynamic advisory cards
+// ─────────────────────────────────────────────────────────────────────────────
+function HealthPanel({ recommendations }) {
+  if (!recommendations?.length) return null
+  return (
+    <div style={{
+      background: T.bg2, borderRadius: 12, padding: '1.2rem',
+      border: `1px solid ${T.border}`, marginBottom: '1.2rem'
+    }}>
+      <div style={{ fontWeight: 700, fontSize: '.9rem', color: T.text, marginBottom: '.8rem' }}>
+        🏥 Health Precautions
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '.45rem' }}>
+        {recommendations.map((rec, i) => {
+          const s = SEV[rec.severity] ?? SEV.info
+          return (
+            <div key={i} style={{
+              display: 'flex', alignItems: 'flex-start', gap: '.7rem',
+              background: s.bg, border: `1px solid ${s.border}`,
+              borderRadius: 8, padding: '.55rem .85rem'
+            }}>
+              <span style={{ fontSize: '1.1rem', flexShrink: 0, lineHeight: 1.4 }}>{rec.icon}</span>
+              <div style={{ flex: 1 }}>
+                <span style={{ fontSize: '.82rem', color: T.text }}>{rec.text}</span>
+                <span style={{
+                  fontSize: '.62rem', color: s.text, marginLeft: '.6rem',
+                  background: s.border, borderRadius: 4, padding: '1px 5px',
+                  verticalAlign: 'middle'
+                }}>{rec.category}</span>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  AnomalyBanner
+// ─────────────────────────────────────────────────────────────────────────────
+function AnomalyBanner({ anomalies }) {
+  const active = anomalies.filter(a => a.isAnomaly)
+  if (active.length === 0) return null
+  const isCritical = active.some(a => a.severity === 'critical')
+  const col = isCritical ? T.red : T.amber
+
+  return (
+    <div style={{
+      background: col + '12', border: `1px solid ${col}40`,
+      borderRadius: 10, padding: '.75rem 1.1rem', marginBottom: '1rem',
+      display: 'flex', alignItems: 'flex-start', gap: '.8rem'
+    }}>
+      <span style={{ fontSize: '1.3rem' }}>⚡</span>
+      <div>
+        <div style={{ fontWeight: 600, color: col, fontSize: '.88rem', marginBottom: '.25rem' }}>
+          Anomaly Detected {isCritical ? '— Extreme Spike' : '— Unusual Reading'}
+        </div>
+        {active.map((a, i) => (
+          <div key={i} style={{ fontSize: '.78rem', color: T.text, marginTop: '.1rem' }}>
+            <span style={{ color: col, fontWeight: 600 }}>[{a.sensor}]</span> {a.message}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  StatsGrid  — session min / max / avg for every sensor
+// ─────────────────────────────────────────────────────────────────────────────
+function StatsGrid({ transformedHistory }) {
+  const count = transformedHistory.length
+  return (
+    <div style={{
+      background: T.bg2, borderRadius: 12, padding: '1.2rem',
+      border: `1px solid ${T.border}`, marginBottom: '1rem'
+    }}>
+      <div style={{ fontWeight: 700, fontSize: '.9rem', color: T.text, marginBottom: '.8rem' }}>
+        📊 Session Analytics
+        <span style={{ fontSize: '.72rem', color: T.textSub, fontWeight: 400, marginLeft: '.6rem' }}>
+          {count} readings
+        </span>
+      </div>
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+        gap: '.6rem'
+      }}>
+        {SENSORS.map(s => {
+          const st = getSensorStats(transformedHistory, s.key)
+          if (!st) return null
+          const tCol = st.trend === 'rising' ? T.red : st.trend === 'falling' ? T.green : T.textSub
+          const arrow = st.trend === 'rising' ? '↑' : st.trend === 'falling' ? '↓' : '→'
+          return (
+            <div key={s.key} style={{
+              background: T.bg3, borderRadius: 8, padding: '.75rem .9rem',
+              border: `1px solid ${T.border}`,
+              borderLeft: `3px solid ${s.color}`
+            }}>
+              <div style={{ fontSize: '.7rem', color: T.textSub, marginBottom: '.35rem', letterSpacing: '.06em', textTransform: 'uppercase' }}>
+                {s.label}
+              </div>
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
+                fontSize: '.78rem', gap: '.2rem'
+              }}>
+                <div>
+                  <div style={{ fontSize: '.6rem', color: T.textMuted }}>MIN</div>
+                  <div style={{ color: T.text, fontFamily: '"JetBrains Mono", monospace' }}>{st.min}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: '.6rem', color: T.textMuted }}>AVG</div>
+                  <div style={{ color: s.color, fontFamily: '"JetBrains Mono", monospace' }}>{st.avg}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: '.6rem', color: T.textMuted }}>MAX</div>
+                  <div style={{ color: T.text, fontFamily: '"JetBrains Mono", monospace' }}>{st.max}</div>
+                </div>
+                <div>
+                  <div style={{ fontSize: '.6rem', color: T.textMuted }}>TREND</div>
+                  <div style={{ color: tCol, fontFamily: '"JetBrains Mono", monospace' }}>
+                    {arrow}{Math.abs(st.trendPct)}%
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Main App
+// ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
   const [current,  setCurrent]  = useState(null)
   const [history,  setHistory]  = useState([])
   const [lastSeen, setLastSeen] = useState(null)
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
+  const [tab,      setTab]      = useState('dashboard')
 
-  // Responsive listener
+  // ── Font injection ─────────────────────────────────────────────────────
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth < 768)
-    window.addEventListener('resize', handleResize)
-    return () => window.removeEventListener('resize', handleResize)
+    const link   = document.createElement('link')
+    link.rel     = 'stylesheet'
+    link.href    = 'https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Outfit:wght@400;500;600;700&display=swap'
+    document.head.appendChild(link)
+    return () => document.head.removeChild(link)
   }, [])
 
-  // Live current reading from Firebase
+  // ── Responsive ────────────────────────────────────────────────────────
   useEffect(() => {
-    const currentRef = ref(db, 'readings/current')
-    return onValue(currentRef, snap => {
+    const fn = () => setIsMobile(window.innerWidth < 768)
+    window.addEventListener('resize', fn)
+    return () => window.removeEventListener('resize', fn)
+  }, [])
+
+  // ── Firebase: current reading ─────────────────────────────────────────
+  useEffect(() => {
+    return onValue(ref(db, 'readings/current'), snap => {
       if (snap.exists()) {
         setCurrent(snap.val())
         setLastSeen(new Date().toLocaleTimeString('en-PH', {
-          hour:     '2-digit',
-          minute:   '2-digit',
-          second:   '2-digit',
-          timeZone: 'Asia/Manila'
+          hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: 'Asia/Manila'
         }))
       }
     })
   }, [])
 
-  // Last 30 history readings from Firebase
+  // ── Firebase: last 30 history readings ────────────────────────────────
   useEffect(() => {
     const histRef = query(ref(db, 'readings/history'), limitToLast(30))
     return onValue(histRef, snap => {
@@ -105,9 +477,7 @@ export default function App() {
         const entries = Object.values(snap.val()).map(r => ({
           ...r,
           time: new Date(r.timestamp * 1000).toLocaleTimeString('en-PH', {
-            hour:     '2-digit',
-            minute:   '2-digit',
-            timeZone: 'Asia/Manila'
+            hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Manila'
           })
         }))
         setHistory(entries)
@@ -115,181 +485,362 @@ export default function App() {
     })
   }, [])
 
-  // ─── Derived Values ─────────────────────────────────────────────
-  const aqi        = current ? Math.round(current.aqi) : null
-  const nano       = current ? Math.round(current.nano_index) : null
-  const aqiLevel   = aqi  ? getAQILevel(aqi)  : null
-  const nanoLevel  = nano ? getNanoLevel(nano) : null
-  const prediction = predictNext(history, 'nano_index')
-  const coPpm      = current ? adcToCOppm(current.co) : null
-  const smoke      = current ? getSmokeLevel(current.smoke) : null
+  // ── Transform history: add computed sensor keys ────────────────────────
+  const transformedHistory = useMemo(() => history.map(r => ({
+    ...r,
+    pm25_ug:   +((r.pm25 || 0) * 1000).toFixed(2),
+    co_ppm:    +adcToCOppm(r.co),
+    smoke_pct: +((r.smoke / 1023) * 100).toFixed(1),
+  })), [history])
 
-  // ─── Render ─────────────────────────────────────────────────────
+  // ── Derived values ─────────────────────────────────────────────────────
+  const aqi      = current ? Math.round(current.aqi)        : null
+  const nano     = current ? Math.round(current.nano_index) : null
+  const aqiLevel = aqi  ? getAQILevel(aqi)  : null
+  const nanoLevel= nano ? getNanoLevel(nano) : null
+  const coPpm    = current ? adcToCOppm(current.co)      : null
+  const smoke    = current ? getSmokeLevel(current.smoke) : null
+
+  const currentTransformed = useMemo(() => current ? {
+    ...current,
+    pm25_ug:   +((current.pm25 || 0) * 1000).toFixed(2),
+    co_ppm:    +adcToCOppm(current.co),
+    smoke_pct: +((current.smoke || 0) / 1023 * 100).toFixed(1),
+  } : null, [current])
+
+  const recommendations = useMemo(() =>
+    current ? getHealthRecommendations(aqi, nano, smoke?.pct, coPpm) : [],
+    [aqi, nano, smoke, coPpm, current]
+  )
+
+  const anomalies = useMemo(() => {
+    if (!current || history.length < 10) return []
+    return [
+      { sensor: 'AQI',        ...detectAnomaly(transformedHistory, 'aqi',        current.aqi) },
+      { sensor: 'Nano Index', ...detectAnomaly(transformedHistory, 'nano_index',  current.nano_index) },
+      { sensor: 'PM2.5',      ...detectAnomaly(transformedHistory, 'pm25_ug',     currentTransformed?.pm25_ug) },
+      { sensor: 'CO',         ...detectAnomaly(transformedHistory, 'co_ppm',      currentTransformed?.co_ppm) },
+    ]
+  }, [current, history.length, transformedHistory, currentTransformed])
+
+  const nanoForecast = useMemo(() => forecastTimeline(history, 'nano_index', 6), [history])
+  const prediction   = useMemo(() => predictNext(history, 'nano_index'), [history])
+
+  // ── CSV download ────────────────────────────────────────────────────────
+  const downloadCSV = useCallback(() => {
+    const csv  = generateCSV(history)
+    const blob = new Blob([csv], { type: 'text/csv' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href     = url
+    a.download = `air_quality_${new Date().toISOString().slice(0, 10)}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  }, [history])
+
+  // ── Shared styles ────────────────────────────────────────────────────────
+  const tabBtn = (id) => ({
+    padding: '.42rem .9rem', borderRadius: 7, cursor: 'pointer',
+    fontSize: '.8rem', border: `1px solid ${tab === id ? T.cyan + '55' : 'transparent'}`,
+    background: tab === id ? T.cyan + '18' : 'transparent',
+    color: tab === id ? T.cyan : T.textSub,
+    fontFamily: 'inherit', transition: 'all .18s', whiteSpace: 'nowrap'
+  })
+
+  const panelStyle = {
+    background: T.bg2, borderRadius: 12, padding: '1.2rem',
+    border: `1px solid ${T.border}`
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: '#0f172a',
-      color: '#e2e8f0',
-      fontFamily: 'Segoe UI, sans-serif'
-    }}>
+    <div style={{ minHeight: '100vh', background: T.bg0, color: T.text, fontFamily: '"Outfit", "Segoe UI", sans-serif' }}>
 
-      {/* Header */}
+      {/* ══ Injected Global Styles ══════════════════════════════════════════ */}
+      <style>{`
+        @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.85)} }
+        button:hover { filter: brightness(1.12) }
+        ::-webkit-scrollbar { width:6px; height:6px }
+        ::-webkit-scrollbar-track { background: ${T.bg0} }
+        ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius:4px }
+      `}</style>
+
+      {/* ══ Header ══════════════════════════════════════════════════════════ */}
       <div style={{
-        background: '#1e293b', padding: '1rem 2rem',
-        borderBottom: '1px solid #334155'
+        background: T.bg1, borderBottom: `1px solid ${T.border}`,
+        padding: '.85rem 1.5rem',
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+        flexWrap: 'wrap', gap: '.6rem'
       }}>
-        <h1 style={{ fontSize: '1.2rem', fontWeight: 600, margin: 0 }}>
-          🌬 Smart Air Quality Monitor
-        </h1>
-        <p style={{ fontSize: '.8rem', color: '#64748b', margin: '.2rem 0 0' }}>
-          IoT-Driven · Nanoparticle Prediction · Firebase Real-time
+        <div>
+          <div style={{ fontWeight: 700, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '.5rem' }}>
+            <span style={{
+              color: T.cyan, fontSize: '1.2rem',
+              textShadow: `0 0 12px ${T.cyan}88`
+            }}>◈</span>
+            Smart Air Quality Monitor
+          </div>
+          <div style={{ fontSize: '.7rem', color: T.textSub, marginTop: '.1rem' }}>
+            IoT · Arduino + ESP32 · Firebase Real-time
+            {lastSeen && <span style={{ marginLeft: 10 }}>· Last update: {lastSeen}</span>}
+          </div>
+        </div>
+        <div style={{ display: 'flex', gap: '.6rem', alignItems: 'center' }}>
+          <button
+            onClick={downloadCSV}
+            disabled={history.length === 0}
+            style={{
+              background: T.bg3, border: `1px solid ${T.borderMid}`,
+              color: T.text, borderRadius: 8, padding: '.38rem .85rem',
+              cursor: history.length ? 'pointer' : 'not-allowed',
+              fontSize: '.76rem', fontFamily: 'inherit',
+              display: 'flex', alignItems: 'center', gap: '.35rem',
+              opacity: history.length ? 1 : 0.4
+            }}>
+            ⬇ Export CSV
+          </button>
           {lastSeen && (
-            <span style={{ marginLeft: 12 }}>Last update: {lastSeen}</span>
+            <div style={{
+              width: 8, height: 8, borderRadius: '50%', background: T.green,
+              boxShadow: `0 0 8px ${T.green}`,
+              animation: 'pulse 2.2s ease-in-out infinite'
+            }} title="Live" />
           )}
-        </p>
+        </div>
       </div>
 
-      <div style={{ maxWidth: 980, margin: '0 auto', padding: '1.5rem' }}>
+      {/* ══ Tab Bar ═════════════════════════════════════════════════════════ */}
+      <div style={{
+        background: T.bg1, borderBottom: `1px solid ${T.border}`,
+        padding: '.4rem 1.5rem', display: 'flex', gap: '.3rem',
+        overflowX: 'auto'
+      }}>
+        {[
+          { id: 'dashboard', label: '📊 Dashboard' },
+          { id: 'forecast',  label: '🔮 Forecast'  },
+          { id: 'sensors',   label: '📡 All Sensors' },
+          { id: 'analytics', label: '🔬 Analytics'  },
+        ].map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={tabBtn(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* ══ Content ═════════════════════════════════════════════════════════ */}
+      <div style={{ maxWidth: 1280, margin: '0 auto', padding: '1.1rem 1.4rem' }}>
+
+        {/* Anomaly Banner */}
+        <AnomalyBanner anomalies={anomalies} />
 
         {/* Status Banner */}
         {aqiLevel && (
           <div style={{
-            background: aqiLevel.color + '18',
-            border: `1px solid ${aqiLevel.color}44`,
-            borderRadius: 10, padding: '.9rem 1.2rem',
-            marginBottom: '1.2rem',
-            display: 'flex', alignItems: 'center',
-            gap: '1rem', flexWrap: 'wrap'
+            background: aqiLevel.color + '13', border: `1px solid ${aqiLevel.color}38`,
+            borderRadius: 10, padding: '.8rem 1.2rem', marginBottom: '1.1rem',
+            display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap'
           }}>
-            <span style={{ fontSize: '1.6rem' }}>
-              {aqi <= 50  ? '😊'
-             : aqi <= 100 ? '😐'
-             : aqi <= 150 ? '😷'
-             :               '🚨'}
+            <span style={{ fontSize: '1.7rem' }}>
+              {aqi <= 50 ? '😊' : aqi <= 100 ? '😐' : aqi <= 150 ? '😷' : '🚨'}
             </span>
-
             <div>
-              <div style={{ fontWeight: 600, color: aqiLevel.color, fontSize: '1rem' }}>
+              <div style={{ fontWeight: 700, color: aqiLevel.color, fontSize: '.98rem' }}>
                 Air Quality: {aqiLevel.label}
               </div>
-              <div style={{ fontSize: '.85rem', color: '#94a3b8', marginTop: '.15rem' }}>
-                AQI {aqi} · Nano Index {nano} ({nanoLevel?.label})
+              <div style={{ fontSize: '.78rem', color: T.textSub, marginTop: '.12rem' }}>
+                AQI <strong style={{ color: T.cyan }}>{aqi}</strong>
+                &nbsp;·&nbsp;
+                Nano Index <strong style={{ color: T.purple }}>{nano}</strong>
+                &nbsp;({nanoLevel?.label})
+                &nbsp;·&nbsp;CO {coPpm} ppm
               </div>
-              {smoke && smoke.pct >= 60 && (
-                <div style={{ fontSize: '.78rem', color: smoke.color, marginTop: '.2rem' }}>
+              {smoke && smoke.pct >= 40 && (
+                <div style={{ fontSize: '.74rem', color: smoke.color, marginTop: '.12rem' }}>
                   🔥 Smoke / gas detected — {smoke.label} ({smoke.pct}%)
                 </div>
               )}
             </div>
-
-            {/* Prediction */}
             {prediction.value && (
               <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-                <div style={{ fontSize: '.75rem', color: '#94a3b8' }}>
-                  Predicted next nano
-                </div>
-                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: '#a78bfa' }}>
+                <div style={{ fontSize: '.68rem', color: T.textSub }}>Nano next est.</div>
+                <div style={{
+                  fontSize: '1.6rem', fontWeight: 700, color: T.purple,
+                  fontFamily: '"JetBrains Mono", monospace', lineHeight: 1
+                }}>
                   {prediction.value}
                 </div>
                 <div style={{
-                  fontSize: '.75rem',
-                  color: prediction.trend === 'rising'  ? '#ef4444'
-                       : prediction.trend === 'falling' ? '#22c55e'
-                       :                                  '#94a3b8'
+                  fontSize: '.7rem',
+                  color: prediction.trend === 'rising'  ? T.red
+                       : prediction.trend === 'falling' ? T.green : T.textSub
                 }}>
                   {prediction.trend === 'rising'  ? '↑ rising'
-                 : prediction.trend === 'falling' ? '↓ falling'
-                 :                                  '→ stable'}
-                  {' '}({prediction.pct}%)
+                 : prediction.trend === 'falling' ? '↓ falling' : '→ stable'}
+                  &nbsp;({prediction.pct}%)
                 </div>
               </div>
             )}
           </div>
         )}
 
-        {/* Metric Cards */}
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))',
-          gap: '1rem',
-          marginBottom: '1.2rem'
-        }}>
-          <MetricCard
-            label="AQI"
-            value={aqi}
-            unit="Air Quality Index"
-            color={aqiLevel?.color}
-          />
-          <MetricCard
-            label="Nano Index"
-            value={nano}
-            unit="0–500 scale"
-            color={nanoLevel?.color}
-          />
-          <MetricCard
-            label="PM2.5"
-            value={current ? (current.pm25 * 1000).toFixed(1) : null}
-            unit="µg/m³"
-            color="#38bdf8"
-          />
-          <MetricCard
-            label="Temperature"
-            value={current?.temperature}
-            unit="°C"
-            color="#fb923c"
-          />
-          <MetricCard
-            label="Humidity"
-            value={current?.humidity}
-            unit="% RH"
-            color="#34d399"
-          />
-          <MetricCard
-            label="CO (MQ-7)"
-            value={coPpm}
-            unit="ppm (est.)"
-            color="#f472b6"
-          />
-          <MetricCard
-          label="Smoke / Gas"
-          value={smoke ? smoke.pct + '%' : '--'}
-          unit={smoke ? smoke.label : 'MQ-2 sensor'}
-          color={smoke?.color}
-          />
-        </div>
-
-        {/* Charts */}
-        {history.length > 0 ? (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr',
-            gap: '1rem'
-          }}>
-            <Chart
-              data={history}
-              dataKey="aqi"
-              color="#38bdf8"
-              label="AQI over time (rolling avg)"
-            />
-            <Chart
-              data={history}
-              dataKey="nano_index"
-              color="#a78bfa"
-              label="Nano index over time"
-            />
-          </div>
-        ) : (
-          <div style={{
-            textAlign: 'center', padding: '4rem',
-            color: '#475569', background: '#1e293b',
-            borderRadius: 12, border: '1px solid #334155'
-          }}>
-            <div style={{ fontSize: '2rem', marginBottom: '.5rem' }}>📡</div>
-            <div>Waiting for sensor data from ESP32...</div>
-            <div style={{ fontSize: '.8rem', marginTop: '.4rem', color: '#334155' }}>
-              Make sure your Arduino and ESP32 are powered and connected
+        {/* ══════════ DASHBOARD TAB ══════════════════════════════════════════ */}
+        {tab === 'dashboard' && (
+          <>
+            {/* Metric Cards */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: `repeat(auto-fit, minmax(${isMobile ? '130px' : '155px'}, 1fr))`,
+              gap: '.75rem', marginBottom: '1.1rem'
+            }}>
+              {SENSORS.map(s => {
+                const val   = currentTransformed?.[s.key] ?? null
+                const stats = getSensorStats(transformedHistory, s.key)
+                return <MetricCard key={s.key} sensor={s} value={val} stats={stats} />
+              })}
             </div>
-          </div>
+
+            {/* Health recommendations */}
+            <HealthPanel recommendations={recommendations} />
+
+            {/* AQI + Nano index charts (with forecast on nano) */}
+            {history.length > 0 ? (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr',
+                gap: '1rem'
+              }}>
+                <SensorChart data={transformedHistory} sensor={SENSORS[0]} />
+                <SensorChart data={transformedHistory} sensor={SENSORS[1]} forecastPoints={nanoForecast} />
+              </div>
+            ) : (
+              <div style={{
+                ...panelStyle, textAlign: 'center', padding: '4rem',
+                color: T.textSub
+              }}>
+                <div style={{ fontSize: '2.5rem', marginBottom: '.6rem' }}>📡</div>
+                <div style={{ fontSize: '.92rem' }}>Waiting for sensor data from ESP32...</div>
+                <div style={{ fontSize: '.78rem', marginTop: '.4rem', color: T.textMuted }}>
+                  Ensure Arduino and ESP32 are powered and connected to WiFi
+                </div>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ══════════ FORECAST TAB ══════════════════════════════════════════ */}
+        {tab === 'forecast' && (
+          <>
+            <ForecastPanel history={history} />
+            <div style={panelStyle}>
+              <div style={{ fontWeight: 600, fontSize: '.88rem', color: T.text, marginBottom: '.6rem' }}>
+                How forecasting works
+              </div>
+              <div style={{ fontSize: '.8rem', color: T.textSub, lineHeight: 1.75 }}>
+                <div>• Uses <strong style={{ color: T.text }}>ordinary least squares (OLS) linear regression</strong> on the last 15 sensor readings.</div>
+                <div>• Projects forward up to <strong style={{ color: T.text }}>6 readings</strong> — each step corresponds to one Arduino sensor cycle (~2 s).</div>
+                <div>• Confidence interval widens with projection distance using root-mean-square error (RMSE) × √steps.</div>
+                <div>• Best accuracy during steady-state conditions. Sudden events (cooking, traffic, HVAC) may cause rapid divergence.</div>
+                <div>• The forecast updates automatically with every new Firebase reading.</div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ══════════ ALL SENSORS TAB ═══════════════════════════════════════ */}
+        {tab === 'sensors' && (
+          <>
+            {history.length === 0 ? (
+              <div style={{
+                ...panelStyle, textAlign: 'center', padding: '4rem', color: T.textSub
+              }}>
+                <div style={{ fontSize: '2.5rem', marginBottom: '.6rem' }}>📡</div>
+                <div>Waiting for sensor data from ESP32...</div>
+              </div>
+            ) : (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: isMobile
+                  ? '1fr'
+                  : 'repeat(auto-fit, minmax(360px, 1fr))',
+                gap: '1rem'
+              }}>
+                {SENSORS.map(s => (
+                  <SensorChart
+                    key={s.key}
+                    data={transformedHistory}
+                    sensor={s}
+                    forecastPoints={s.key === 'nano_index' ? nanoForecast : []}
+                  />
+                ))}
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ══════════ ANALYTICS TAB ═════════════════════════════════════════ */}
+        {tab === 'analytics' && (
+          <>
+            <StatsGrid transformedHistory={transformedHistory} />
+
+            {/* Hazard summary */}
+            {current && (
+              <div style={{ ...panelStyle, marginBottom: '1rem' }}>
+                <div style={{ fontWeight: 600, fontSize: '.88rem', color: T.text, marginBottom: '.7rem' }}>
+                  🚦 Current Status Summary
+                </div>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                  gap: '.6rem'
+                }}>
+                  {[
+                    { label: 'AQI Status',    level: aqiLevel?.label,    color: aqiLevel?.color },
+                    { label: 'Nano Risk',     level: nanoLevel?.label,   color: nanoLevel?.color },
+                    { label: 'Smoke Level',   level: smoke?.label,       color: smoke?.color },
+                  ].map((item, i) => item.level ? (
+                    <div key={i} style={{
+                      background: (item.color ?? T.cyan) + '14',
+                      border: `1px solid ${(item.color ?? T.cyan) + '40'}`,
+                      borderRadius: 8, padding: '.65rem .9rem'
+                    }}>
+                      <div style={{ fontSize: '.65rem', color: T.textSub, textTransform: 'uppercase', letterSpacing: '.08em' }}>
+                        {item.label}
+                      </div>
+                      <div style={{ fontWeight: 700, color: item.color, marginTop: '.25rem' }}>
+                        {item.level}
+                      </div>
+                    </div>
+                  ) : null)}
+                </div>
+              </div>
+            )}
+
+            {/* Export */}
+            <div style={{ display: 'flex', gap: '.8rem', flexWrap: 'wrap' }}>
+              <button
+                onClick={downloadCSV}
+                disabled={history.length === 0}
+                style={{
+                  flex: '1 1 200px', background: T.bg2,
+                  border: `1px solid ${T.borderMid}`, color: T.text,
+                  borderRadius: 10, padding: '.9rem 1.5rem', cursor: 'pointer',
+                  fontSize: '.85rem', fontFamily: 'inherit',
+                  opacity: history.length ? 1 : 0.4
+                }}>
+                ⬇ Download CSV Report
+                <span style={{ color: T.textSub, marginLeft: '.5rem' }}>({history.length} readings)</span>
+              </button>
+              <div style={{
+                flex: '1 1 200px', background: T.bg2,
+                border: `1px solid ${T.border}`, borderRadius: 10,
+                padding: '.9rem 1.5rem', fontSize: '.82rem', color: T.textSub
+              }}>
+                Session started: {history[0]?.time ?? '--'}
+                &nbsp;·&nbsp;
+                Latest: {history[history.length - 1]?.time ?? '--'}
+              </div>
+            </div>
+          </>
         )}
 
       </div>
