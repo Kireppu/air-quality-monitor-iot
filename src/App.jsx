@@ -89,7 +89,12 @@ export default function App() {
     return onValue(currentRef, snap => {
       if (snap.exists()) {
         setCurrent(snap.val())
-        setLastSeen(new Date().toLocaleTimeString())
+        setLastSeen(new Date().toLocaleTimeString('en-PH', {
+          hour:     '2-digit',
+          minute:   '2-digit',
+          second:   '2-digit',
+          timeZone: 'Asia/Manila'
+        }))
       }
     })
   }, [])
@@ -101,8 +106,10 @@ export default function App() {
       if (snap.exists()) {
         const entries = Object.values(snap.val()).map(r => ({
           ...r,
-          time: new Date(r.timestamp).toLocaleTimeString([], {
-            hour: '2-digit', minute: '2-digit'
+          time: new Date(r.timestamp * 1000).toLocaleTimeString('en-PH', {
+            hour:     '2-digit',
+            minute:   '2-digit',
+            timeZone: 'Asia/Manila'
           })
         }))
         setHistory(entries)
