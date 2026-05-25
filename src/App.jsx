@@ -2,10 +2,11 @@
 //  App.jsx  ·  Smart Air Quality Monitor — Enhanced Dashboard
 //  Features: Timeline Forecast · Health Advisories · All-Sensor Charts
 //            Session Analytics · Anomaly Detection · CSV Export
+//            🤖 AI Tab: TensorFlow.js Neural Network + Google Gemini 2.0 Flash
 // ─────────────────────────────────────────────────────────────────────────────
-import { useEffect, useState, useMemo, useCallback } from 'react'
-import { ref, onValue, query, limitToLast }           from 'firebase/database'
-import { db }                                          from './firebase'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
+import { ref, onValue, query, limitToLast }                   from 'firebase/database'
+import { db }                                                  from './firebase'
 import {
   ComposedChart, LineChart, Line, Area, XAxis, YAxis,
   Tooltip, ResponsiveContainer, CartesianGrid
@@ -13,8 +14,9 @@ import {
 import {
   getAQILevel, getNanoLevel, predictNext, adcToCOppm, getSmokeLevel,
   forecastTimeline, getHealthRecommendations, detectAnomaly,
-  getSensorStats, generateCSV
+  getSensorStats, generateCSV, trainAndPredictTF
 } from './utils/calculations'
+import { useGeminiInsights } from './hooks/useGeminiInsights'
 
 // ─── Design Tokens ───────────────────────────────────────────────────────────
 const T = {
@@ -27,7 +29,6 @@ const T = {
 }
 
 // ─── Sensor Configuration ────────────────────────────────────────────────────
-// `key` matches the transformed history field
 const SENSORS = [
   { key: 'aqi',         label: 'AQI',          unit: '',       chartUnit: 'Index',   color: T.cyan,   fmt: v => Math.round(v)        },
   { key: 'nano_index',  label: 'Nano Index',    unit: '',       chartUnit: 'Index',   color: T.purple, fmt: v => Math.round(v)        },
@@ -37,6 +38,9 @@ const SENSORS = [
   { key: 'co_ppm',      label: 'CO (MQ-7)',     unit: 'ppm',   chartUnit: 'ppm',    color: T.pink,   fmt: v => (+v).toFixed(1)      },
   { key: 'smoke_pct',   label: 'Smoke / Gas',   unit: '%',     chartUnit: '%',      color: T.amber,  fmt: v => Math.round(v) + '%'  },
 ]
+
+// Sensors that get neural-network training (the 4 most analytically relevant)
+const ML_SENSOR_KEYS = ['aqi', 'nano_index', 'co_ppm', 'pm25_ug']
 
 const SEV = {
   good:     { bg: '#10b98114', border: '#10b98140', text: '#10b981' },
@@ -71,7 +75,6 @@ function MetricCard({ sensor, value, stats }) {
       background: T.bg2, borderRadius: 10, padding: '1rem',
       border: `1px solid ${T.border}`, position: 'relative', overflow: 'hidden'
     }}>
-      {/* Top accent glow */}
       <div style={{
         position: 'absolute', top: 0, left: 0, right: 0, height: 2,
         background: `linear-gradient(90deg, transparent, ${sensor.color}aa, transparent)`
@@ -111,9 +114,9 @@ function MetricCard({ sensor, value, stats }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  SensorChart  — used in "All Sensors" tab, optionally with forecast overlay
+//  SensorChart — used in "All Sensors" tab, optionally with forecast overlay
 // ─────────────────────────────────────────────────────────────────────────────
-function SensorChart({ data, sensor, forecastPoints = [] }) {
+function SensorChart({ data, sensor, forecastPoints = [], forecastLabel = 'forecast' }) {
   const combined = useMemo(() => {
     if (forecastPoints.length === 0)
       return data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
@@ -121,7 +124,6 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
     const hist = data.map(d => ({ time: d.time, actual: d[sensor.key], forecast: null }))
     if (hist.length === 0) return hist
 
-    // Bridge: last real point starts the dashed line
     const bridge = { ...hist[hist.length - 1], forecast: hist[hist.length - 1].actual }
     const fpts   = forecastPoints.map(f => ({ time: `+${f.step}`, actual: null, forecast: f.value }))
     return [...hist, bridge, ...fpts]
@@ -138,7 +140,7 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
       }}>
         <span>{sensor.label} <span style={{ color: T.textMuted }}>({sensor.chartUnit})</span></span>
         {forecastPoints.length > 0 && (
-          <span style={{ fontSize: '.7rem', color: T.purple }}>— actual &nbsp;··· forecast</span>
+          <span style={{ fontSize: '.7rem', color: T.purple }}>— actual &nbsp;··· {forecastLabel}</span>
         )}
       </div>
       <ResponsiveContainer width="100%" height={155}>
@@ -171,7 +173,7 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  ForecastPanel  — full-width timeline prediction for Nano Index
+//  ForecastPanel — full-width timeline prediction for Nano Index (OLS)
 // ─────────────────────────────────────────────────────────────────────────────
 function ForecastPanel({ history }) {
   const forecasts = useMemo(() => forecastTimeline(history, 'nano_index', 6), [history])
@@ -217,14 +219,13 @@ function ForecastPanel({ history }) {
       background: T.bg2, borderRadius: 12, padding: '1.2rem 1.4rem',
       border: `1px solid ${T.border}`, marginBottom: '1.2rem'
     }}>
-      {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '.9rem' }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: '1rem', color: T.text }}>
             🔮 Nano Index Forecast
           </div>
           <div style={{ fontSize: '.73rem', color: T.textSub, marginTop: '.2rem' }}>
-            Linear regression · next 6 readings (each step ≈ 2 s sensor interval)
+            OLS linear regression · next 6 readings · see 🤖 AI tab for neural network forecast
           </div>
         </div>
         <div style={{ textAlign: 'right' }}>
@@ -242,25 +243,20 @@ function ForecastPanel({ history }) {
         </div>
       </div>
 
-      {/* Chart: past (solid cyan) + forecast (dashed purple) */}
       <ResponsiveContainer width="100%" height={200}>
         <ComposedChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: -10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
           <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} interval="preserveStartEnd" tickLine={false} />
           <YAxis tick={{ fill: T.textMuted, fontSize: 10 }} width={36} tickLine={false} />
           <Tooltip {...TT} />
-          {/* Confidence band: two overlapping areas */}
           <Area type="monotone" dataKey="upper" fill="rgba(167,139,250,0.10)" stroke="none" isAnimationActive={false} />
           <Area type="monotone" dataKey="lower" fill={T.bg2} stroke="none" isAnimationActive={false} />
-          {/* Actual readings */}
           <Line type="monotone" dataKey="actual" stroke={T.cyan} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
-          {/* Projected readings */}
           <Line type="monotone" dataKey="forecast" stroke={T.purple} strokeWidth={2} strokeDasharray="6 3"
             dot={{ r: 3, fill: T.purple, strokeWidth: 0 }} isAnimationActive={false} connectNulls />
         </ComposedChart>
       </ResponsiveContainer>
 
-      {/* Step cards */}
       <div style={{ display: 'flex', gap: '.5rem', marginTop: '.9rem', flexWrap: 'wrap' }}>
         {forecasts.map((f) => {
           const level = getNanoLevel(f.value)
@@ -285,7 +281,6 @@ function ForecastPanel({ history }) {
         })}
       </div>
 
-      {/* Legend */}
       <div style={{ display: 'flex', gap: '1.2rem', marginTop: '.8rem', fontSize: '.72rem', color: T.textSub }}>
         <span><span style={{ color: T.cyan }}>—</span> Actual readings</span>
         <span><span style={{ color: T.purple }}>···</span> Projected</span>
@@ -297,17 +292,24 @@ function ForecastPanel({ history }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  HealthPanel  — dynamic advisory cards
+//  HealthPanel — dynamic advisory cards
 // ─────────────────────────────────────────────────────────────────────────────
-function HealthPanel({ recommendations }) {
+function HealthPanel({ recommendations, aiPowered = false }) {
   if (!recommendations?.length) return null
   return (
     <div style={{
       background: T.bg2, borderRadius: 12, padding: '1.2rem',
       border: `1px solid ${T.border}`, marginBottom: '1.2rem'
     }}>
-      <div style={{ fontWeight: 700, fontSize: '.9rem', color: T.text, marginBottom: '.8rem' }}>
+      <div style={{ fontWeight: 700, fontSize: '.9rem', color: T.text, marginBottom: '.8rem', display: 'flex', alignItems: 'center', gap: '.5rem' }}>
         🏥 Health Precautions
+        {aiPowered && (
+          <span style={{
+            fontSize: '.62rem', color: T.purple, fontWeight: 500,
+            background: T.purple + '22', border: `1px solid ${T.purple}44`,
+            borderRadius: 4, padding: '1px 7px'
+          }}>✨ Gemini AI</span>
+        )}
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '.45rem' }}>
         {recommendations.map((rec, i) => {
@@ -366,7 +368,7 @@ function AnomalyBanner({ anomalies }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  StatsGrid  — session min / max / avg for every sensor
+//  StatsGrid — session min / max / avg for every sensor
 // ─────────────────────────────────────────────────────────────────────────────
 function StatsGrid({ transformedHistory }) {
   const count = transformedHistory.length
@@ -389,7 +391,7 @@ function StatsGrid({ transformedHistory }) {
         {SENSORS.map(s => {
           const st = getSensorStats(transformedHistory, s.key)
           if (!st) return null
-          const tCol = st.trend === 'rising' ? T.red : st.trend === 'falling' ? T.green : T.textSub
+          const tCol  = st.trend === 'rising' ? T.red : st.trend === 'falling' ? T.green : T.textSub
           const arrow = st.trend === 'rising' ? '↑' : st.trend === 'falling' ? '↓' : '→'
           return (
             <div key={s.key} style={{
@@ -400,10 +402,7 @@ function StatsGrid({ transformedHistory }) {
               <div style={{ fontSize: '.7rem', color: T.textSub, marginBottom: '.35rem', letterSpacing: '.06em', textTransform: 'uppercase' }}>
                 {s.label}
               </div>
-              <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)',
-                fontSize: '.78rem', gap: '.2rem'
-              }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', fontSize: '.78rem', gap: '.2rem' }}>
                 <div>
                   <div style={{ fontSize: '.6rem', color: T.textMuted }}>MIN</div>
                   <div style={{ color: T.text, fontFamily: '"JetBrains Mono", monospace' }}>{st.min}</div>
@@ -432,16 +431,236 @@ function StatsGrid({ transformedHistory }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  MLStatusBadge — shows neural network training state
+// ─────────────────────────────────────────────────────────────────────────────
+function MLStatusBadge({ status, count }) {
+  const cfg = {
+    idle:     { color: T.textMuted, icon: '○', text: `Need 10+ readings (have ${count})`,        anim: false },
+    training: { color: T.amber,     icon: '⚙', text: 'Training neural networks...',              anim: true  },
+    ready:    { color: T.green,     icon: '●', text: `Model ready · ${count} training samples`, anim: false },
+    error:    { color: T.red,       icon: '✕', text: 'TF.js not found — run: npm install @tensorflow/tfjs', anim: false },
+  }[status] ?? { color: T.textMuted, icon: '○', text: '', anim: false }
+
+  return (
+    <div style={{
+      display: 'inline-flex', alignItems: 'center', gap: '.45rem',
+      background: cfg.color + '18', border: `1px solid ${cfg.color}38`,
+      borderRadius: 6, padding: '.3rem .85rem', fontSize: '.76rem'
+    }}>
+      <span style={{ color: cfg.color, animation: cfg.anim ? 'pulse 1.2s infinite' : 'none' }}>
+        {cfg.icon}
+      </span>
+      <span style={{ color: cfg.color }}>{cfg.text}</span>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  MLForecastPanel — 2×2 grid of neural-network forecast mini-charts
+// ─────────────────────────────────────────────────────────────────────────────
+function MLForecastPanel({ predictions, status, transformedHistory, isMobile }) {
+  const mlSensors = SENSORS.filter(s => ML_SENSOR_KEYS.includes(s.key))
+
+  if (status === 'idle') return (
+    <div style={{
+      textAlign: 'center', padding: '2.5rem',
+      color: T.textSub, fontSize: '.84rem',
+      background: T.bg3, borderRadius: 10, border: `1px solid ${T.border}`
+    }}>
+      <div style={{ fontSize: '1.8rem', marginBottom: '.5rem' }}>📡</div>
+      Collect 10 or more readings to begin neural network training
+    </div>
+  )
+
+  if (status === 'training') return (
+    <div style={{
+      textAlign: 'center', padding: '3rem',
+      background: T.bg3, borderRadius: 10, border: `1px solid ${T.border}`
+    }}>
+      <div style={{ fontSize: '2.2rem', marginBottom: '.7rem', animation: 'pulse 1.2s ease-in-out infinite' }}>🧠</div>
+      <div style={{ fontSize: '.95rem', color: T.text, fontWeight: 600 }}>Training neural networks...</div>
+      <div style={{ fontSize: '.76rem', color: T.textSub, marginTop: '.4rem' }}>
+        Fitting 4 dense models on {transformedHistory.length} readings · typically 1–3 seconds
+      </div>
+    </div>
+  )
+
+  if (status === 'error') return (
+    <div style={{
+      textAlign: 'center', padding: '2rem',
+      background: T.bg3, borderRadius: 10, border: `1px solid ${T.red}40`,
+      color: T.red, fontSize: '.84rem'
+    }}>
+      <div style={{ marginBottom: '.4rem' }}>⚠ TensorFlow.js is not installed</div>
+      <code style={{ background: T.bg0, padding: '3px 10px', borderRadius: 4, fontSize: '.8rem', color: T.textSub }}>
+        npm install @tensorflow/tfjs
+      </code>
+    </div>
+  )
+
+  // status === 'ready'
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr',
+      gap: '1rem'
+    }}>
+      {mlSensors.map(s => (
+        <SensorChart
+          key={s.key}
+          data={transformedHistory}
+          sensor={s}
+          forecastPoints={predictions[s.key] ?? []}
+          forecastLabel="neural net"
+        />
+      ))}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  GeminiPanel — API key input + AI health advisory display
+// ─────────────────────────────────────────────────────────────────────────────
+function GeminiPanel({ insights, loading, error, geminiInput, onKeyInput, onKeySave, hasKey }) {
+  return (
+    <div style={{
+      background: T.bg2, borderRadius: 12, padding: '1.2rem 1.4rem',
+      border: `1px solid ${T.border}`, marginBottom: '1.2rem'
+    }}>
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: '.9rem', color: T.text }}>
+            ✨ Gemini AI Health Analysis
+          </div>
+          <div style={{ fontSize: '.72rem', color: T.textSub, marginTop: '.15rem' }}>
+            Google Gemini 2.0 Flash · context-aware advisories · auto-updates on significant changes
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '.6rem' }}>
+          {loading && (
+            <span style={{ fontSize: '.75rem', color: T.cyan, animation: 'pulse 1.5s infinite' }}>
+              ✨ Analyzing...
+            </span>
+          )}
+          {hasKey && !loading && insights && (
+            <span style={{ fontSize: '.72rem', color: T.green }}>● Live</span>
+          )}
+        </div>
+      </div>
+
+      {/* API Key input */}
+      <div style={{
+        background: T.bg3, borderRadius: 8, padding: '.85rem 1rem',
+        border: `1px solid ${T.border}`,
+        marginBottom: (hasKey && (insights || loading || error)) ? '1rem' : 0
+      }}>
+        <div style={{ fontSize: '.72rem', color: T.textSub, marginBottom: '.5rem' }}>
+          🔑 Gemini API Key ·{' '}
+          <a
+            href="https://aistudio.google.com/app/apikey"
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: T.cyan, textDecoration: 'none' }}
+          >
+            Get a free key at Google AI Studio →
+          </a>
+        </div>
+        <div style={{ display: 'flex', gap: '.5rem' }}>
+          <input
+            type="password"
+            value={geminiInput}
+            onChange={e => onKeyInput(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && onKeySave()}
+            placeholder="AIzaSy..."
+            style={{
+              flex: 1, background: T.bg0, border: `1px solid ${T.borderMid}`,
+              borderRadius: 7, padding: '.42rem .75rem', color: T.text,
+              fontSize: '.8rem', fontFamily: '"JetBrains Mono", monospace',
+              outline: 'none', minWidth: 0
+            }}
+          />
+          <button
+            onClick={onKeySave}
+            disabled={!geminiInput.trim()}
+            style={{
+              background: T.cyan + '22', border: `1px solid ${T.cyan}55`,
+              color: T.cyan, borderRadius: 7, padding: '.42rem .95rem',
+              cursor: geminiInput.trim() ? 'pointer' : 'not-allowed',
+              fontSize: '.8rem', fontFamily: 'inherit', whiteSpace: 'nowrap',
+              opacity: geminiInput.trim() ? 1 : 0.5
+            }}>
+            {hasKey ? '↻ Update' : '⚡ Activate'}
+          </button>
+        </div>
+        {error && (
+          <div style={{
+            fontSize: '.72rem', color: T.red, marginTop: '.5rem',
+            background: T.red + '12', borderRadius: 5, padding: '.3rem .6rem'
+          }}>
+            ⚠ {error}
+          </div>
+        )}
+      </div>
+
+      {/* Recommendations */}
+      {insights && insights.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '.45rem' }}>
+          {insights.map((rec, i) => {
+            const s = SEV[rec.severity] ?? SEV.info
+            return (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'flex-start', gap: '.7rem',
+                background: s.bg, border: `1px solid ${s.border}`,
+                borderRadius: 8, padding: '.55rem .85rem'
+              }}>
+                <span style={{ fontSize: '1.1rem', flexShrink: 0, lineHeight: 1.4 }}>{rec.icon}</span>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: '.82rem', color: T.text }}>{rec.text}</span>
+                  <span style={{
+                    fontSize: '.62rem', color: s.text, marginLeft: '.6rem',
+                    background: s.border, borderRadius: 4, padding: '1px 5px',
+                    verticalAlign: 'middle'
+                  }}>{rec.category}</span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {!hasKey && (
+        <div style={{ textAlign: 'center', padding: '1.5rem 1rem', color: T.textMuted, fontSize: '.82rem' }}>
+          Enter your Gemini API key above to enable AI-powered health analysis
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Main App
 // ─────────────────────────────────────────────────────────────────────────────
 export default function App() {
-  const [current,  setCurrent]  = useState(null)
-  const [history,  setHistory]  = useState([])
-  const [lastSeen, setLastSeen] = useState(null)
-  const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
-  const [tab,      setTab]      = useState('dashboard')
+  const [current,      setCurrent]      = useState(null)
+  const [history,      setHistory]      = useState([])
+  const [lastSeen,     setLastSeen]     = useState(null)
+  const [isMobile,     setIsMobile]     = useState(window.innerWidth < 768)
+  const [tab,          setTab]          = useState('dashboard')
 
-  // ── Font injection ─────────────────────────────────────────────────────
+  // ── AI state ──────────────────────────────────────────────────────────────
+  const [mlPredictions, setMlPredictions] = useState({})
+  const [mlStatus,      setMlStatus]      = useState('idle')
+  const [geminiKey,     setGeminiKey]     = useState(() => {
+    try { return localStorage.getItem('aqm_gemini_key') || '' } catch { return '' }
+  })
+  const [geminiInput, setGeminiInput]     = useState(() => {
+    try { return localStorage.getItem('aqm_gemini_key') || '' } catch { return '' }
+  })
+
+  const mlThrottleRef = useRef(0)
+
+  // ── Font injection ─────────────────────────────────────────────────────────
   useEffect(() => {
     const link   = document.createElement('link')
     link.rel     = 'stylesheet'
@@ -450,14 +669,14 @@ export default function App() {
     return () => document.head.removeChild(link)
   }, [])
 
-  // ── Responsive ────────────────────────────────────────────────────────
+  // ── Responsive ────────────────────────────────────────────────────────────
   useEffect(() => {
     const fn = () => setIsMobile(window.innerWidth < 768)
     window.addEventListener('resize', fn)
     return () => window.removeEventListener('resize', fn)
   }, [])
 
-  // ── Firebase: current reading ─────────────────────────────────────────
+  // ── Firebase: current reading ─────────────────────────────────────────────
   useEffect(() => {
     return onValue(ref(db, 'readings/current'), snap => {
       if (snap.exists()) {
@@ -469,7 +688,7 @@ export default function App() {
     })
   }, [])
 
-  // ── Firebase: last 30 history readings ────────────────────────────────
+  // ── Firebase: last 30 history readings ────────────────────────────────────
   useEffect(() => {
     const histRef = query(ref(db, 'readings/history'), limitToLast(30))
     return onValue(histRef, snap => {
@@ -485,7 +704,7 @@ export default function App() {
     })
   }, [])
 
-  // ── Transform history: add computed sensor keys ────────────────────────
+  // ── Transform history: add computed sensor keys ────────────────────────────
   const transformedHistory = useMemo(() => history.map(r => ({
     ...r,
     pm25_ug:   +((r.pm25 || 0) * 1000).toFixed(2),
@@ -493,20 +712,56 @@ export default function App() {
     smoke_pct: +((r.smoke / 1023) * 100).toFixed(1),
   })), [history])
 
-  // ── Derived values ─────────────────────────────────────────────────────
-  const aqi      = current ? Math.round(current.aqi)        : null
-  const nano     = current ? Math.round(current.nano_index) : null
-  const aqiLevel = aqi  ? getAQILevel(aqi)  : null
-  const nanoLevel= nano ? getNanoLevel(nano) : null
-  const coPpm    = current ? adcToCOppm(current.co)      : null
-  const smoke    = current ? getSmokeLevel(current.smoke) : null
+  // ── TF.js neural network training ─────────────────────────────────────────
+  // Throttled: fires at most once every 8 seconds per new timestamp.
+  // Uses a cancellation flag so in-flight training from a stale trigger is discarded.
+  const lastTimestamp = transformedHistory[transformedHistory.length - 1]?.timestamp
 
+  useEffect(() => {
+    if (transformedHistory.length < 10) { setMlStatus('idle'); return }
+
+    const now = Date.now()
+    if (now - mlThrottleRef.current < 8_000) return   // throttle
+    mlThrottleRef.current = now
+
+    setMlStatus('training')
+    let cancelled = false
+
+    ;(async () => {
+      try {
+        const results = {}
+        for (const key of ML_SENSOR_KEYS) {
+          if (cancelled) return
+          results[key] = await trainAndPredictTF(transformedHistory, key, 6)
+        }
+        if (!cancelled) {
+          setMlPredictions(results)
+          setMlStatus(Object.values(results).some(r => r.length > 0) ? 'ready' : 'error')
+        }
+      } catch {
+        if (!cancelled) setMlStatus('error')
+      }
+    })()
+
+    return () => { cancelled = true }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastTimestamp])
+
+  // ── Gemini insights hook ──────────────────────────────────────────────────
   const currentTransformed = useMemo(() => current ? {
     ...current,
     pm25_ug:   +((current.pm25 || 0) * 1000).toFixed(2),
     co_ppm:    +adcToCOppm(current.co),
     smoke_pct: +((current.smoke || 0) / 1023 * 100).toFixed(1),
   } : null, [current])
+
+  // ── Derived values ─────────────────────────────────────────────────────────
+  const aqi       = current ? Math.round(current.aqi)        : null
+  const nano      = current ? Math.round(current.nano_index) : null
+  const aqiLevel  = aqi  ? getAQILevel(aqi)  : null
+  const nanoLevel = nano ? getNanoLevel(nano) : null
+  const coPpm     = current ? adcToCOppm(current.co)      : null
+  const smoke     = current ? getSmokeLevel(current.smoke) : null
 
   const recommendations = useMemo(() =>
     current ? getHealthRecommendations(aqi, nano, smoke?.pct, coPpm) : [],
@@ -523,10 +778,20 @@ export default function App() {
     ]
   }, [current, history.length, transformedHistory, currentTransformed])
 
+  const { insights: geminiInsights, loading: geminiLoading, error: geminiError } =
+    useGeminiInsights(geminiKey, currentTransformed, anomalies)
+
   const nanoForecast = useMemo(() => forecastTimeline(history, 'nano_index', 6), [history])
   const prediction   = useMemo(() => predictNext(history, 'nano_index'), [history])
 
-  // ── CSV download ────────────────────────────────────────────────────────
+  // ── Gemini key save ────────────────────────────────────────────────────────
+  const saveGeminiKey = useCallback(() => {
+    const trimmed = geminiInput.trim()
+    setGeminiKey(trimmed)
+    try { localStorage.setItem('aqm_gemini_key', trimmed) } catch {}
+  }, [geminiInput])
+
+  // ── CSV download ───────────────────────────────────────────────────────────
   const downloadCSV = useCallback(() => {
     const csv  = generateCSV(history)
     const blob = new Blob([csv], { type: 'text/csv' })
@@ -538,7 +803,7 @@ export default function App() {
     URL.revokeObjectURL(url)
   }, [history])
 
-  // ── Shared styles ────────────────────────────────────────────────────────
+  // ── Shared styles ─────────────────────────────────────────────────────────
   const tabBtn = (id) => ({
     padding: '.42rem .9rem', borderRadius: 7, cursor: 'pointer',
     fontSize: '.8rem', border: `1px solid ${tab === id ? T.cyan + '55' : 'transparent'}`,
@@ -563,6 +828,7 @@ export default function App() {
         ::-webkit-scrollbar { width:6px; height:6px }
         ::-webkit-scrollbar-track { background: ${T.bg0} }
         ::-webkit-scrollbar-thumb { background: ${T.border}; border-radius:4px }
+        input:focus { outline: 1px solid ${T.borderBright} !important; }
       `}</style>
 
       {/* ══ Header ══════════════════════════════════════════════════════════ */}
@@ -574,15 +840,18 @@ export default function App() {
       }}>
         <div>
           <div style={{ fontWeight: 700, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '.5rem' }}>
-            <span style={{
-              color: T.cyan, fontSize: '1.2rem',
-              textShadow: `0 0 12px ${T.cyan}88`
-            }}>◈</span>
+            <span style={{ color: T.cyan, fontSize: '1.2rem', textShadow: `0 0 12px ${T.cyan}88` }}>◈</span>
             Smart Air Quality Monitor
           </div>
           <div style={{ fontSize: '.7rem', color: T.textSub, marginTop: '.1rem' }}>
             IoT · Arduino + ESP32 · Firebase Real-time
             {lastSeen && <span style={{ marginLeft: 10 }}>· Last update: {lastSeen}</span>}
+            {mlStatus === 'ready' && (
+              <span style={{ marginLeft: 10, color: T.purple }}>· 🧠 Neural net active</span>
+            )}
+            {geminiKey && geminiInsights && (
+              <span style={{ marginLeft: 10, color: T.purple }}>· ✨ Gemini active</span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: '.6rem', alignItems: 'center' }}>
@@ -616,10 +885,11 @@ export default function App() {
         overflowX: 'auto'
       }}>
         {[
-          { id: 'dashboard', label: '📊 Dashboard' },
-          { id: 'forecast',  label: '🔮 Forecast'  },
-          { id: 'sensors',   label: '📡 All Sensors' },
-          { id: 'analytics', label: '🔬 Analytics'  },
+          { id: 'dashboard', label: '📊 Dashboard'   },
+          { id: 'forecast',  label: '🔮 Forecast'    },
+          { id: 'ai',        label: '🤖 AI'           },
+          { id: 'sensors',   label: '📡 All Sensors'  },
+          { id: 'analytics', label: '🔬 Analytics'   },
         ].map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={tabBtn(t.id)}>
             {t.label}
@@ -630,10 +900,10 @@ export default function App() {
       {/* ══ Content ═════════════════════════════════════════════════════════ */}
       <div style={{ maxWidth: 1280, margin: '0 auto', padding: '1.1rem 1.4rem' }}>
 
-        {/* Anomaly Banner */}
+        {/* Anomaly Banner — visible on all tabs */}
         <AnomalyBanner anomalies={anomalies} />
 
-        {/* Status Banner */}
+        {/* Status Banner — visible on all tabs */}
         {aqiLevel && (
           <div style={{
             background: aqiLevel.color + '13', border: `1px solid ${aqiLevel.color}38`,
@@ -683,7 +953,7 @@ export default function App() {
           </div>
         )}
 
-        {/* ══════════ DASHBOARD TAB ══════════════════════════════════════════ */}
+        {/* ════════════════════ DASHBOARD TAB ════════════════════════════════ */}
         {tab === 'dashboard' && (
           <>
             {/* Metric Cards */}
@@ -699,10 +969,24 @@ export default function App() {
               })}
             </div>
 
-            {/* Health recommendations */}
-            <HealthPanel recommendations={recommendations} />
+            {/* Health recommendations — Gemini if key + insights available, else rule-based */}
+            {geminiKey && geminiLoading && !geminiInsights && (
+              <div style={{
+                background: T.bg2, borderRadius: 10, padding: '.65rem 1rem',
+                border: `1px solid ${T.borderMid}`, marginBottom: '.6rem',
+                display: 'flex', alignItems: 'center', gap: '.6rem',
+                fontSize: '.8rem', color: T.textSub
+              }}>
+                <span style={{ animation: 'pulse 1.5s infinite' }}>✨</span>
+                Gemini AI is analyzing your air quality...
+              </div>
+            )}
+            <HealthPanel
+              recommendations={(geminiKey && geminiInsights) ? geminiInsights : recommendations}
+              aiPowered={!!(geminiKey && geminiInsights)}
+            />
 
-            {/* AQI + Nano index charts (with forecast on nano) */}
+            {/* AQI + Nano charts */}
             {history.length > 0 ? (
               <div style={{
                 display: 'grid',
@@ -713,10 +997,7 @@ export default function App() {
                 <SensorChart data={transformedHistory} sensor={SENSORS[1]} forecastPoints={nanoForecast} />
               </div>
             ) : (
-              <div style={{
-                ...panelStyle, textAlign: 'center', padding: '4rem',
-                color: T.textSub
-              }}>
+              <div style={{ ...panelStyle, textAlign: 'center', padding: '4rem', color: T.textSub }}>
                 <div style={{ fontSize: '2.5rem', marginBottom: '.6rem' }}>📡</div>
                 <div style={{ fontSize: '.92rem' }}>Waiting for sensor data from ESP32...</div>
                 <div style={{ fontSize: '.78rem', marginTop: '.4rem', color: T.textMuted }}>
@@ -727,7 +1008,7 @@ export default function App() {
           </>
         )}
 
-        {/* ══════════ FORECAST TAB ══════════════════════════════════════════ */}
+        {/* ════════════════════ FORECAST TAB ═════════════════════════════════ */}
         {tab === 'forecast' && (
           <>
             <ForecastPanel history={history} />
@@ -741,27 +1022,116 @@ export default function App() {
                 <div>• Confidence interval widens with projection distance using root-mean-square error (RMSE) × √steps.</div>
                 <div>• Best accuracy during steady-state conditions. Sudden events (cooking, traffic, HVAC) may cause rapid divergence.</div>
                 <div>• The forecast updates automatically with every new Firebase reading.</div>
+                <div style={{ marginTop: '.5rem', color: T.purple }}>
+                  • For a <strong style={{ color: T.purple }}>neural network forecast</strong> across all 4 key sensors, visit the 🤖 AI tab.
+                </div>
               </div>
             </div>
           </>
         )}
 
-        {/* ══════════ ALL SENSORS TAB ═══════════════════════════════════════ */}
+        {/* ════════════════════ AI TAB ════════════════════════════════════════ */}
+        {tab === 'ai' && (
+          <>
+            {/* ── Section 1: Neural Network Forecast ── */}
+            <div style={{ ...panelStyle, marginBottom: '1.2rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem', flexWrap: 'wrap', gap: '.5rem' }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: '1rem', color: T.text }}>
+                    🧠 Neural Network Forecast
+                  </div>
+                  <div style={{ fontSize: '.73rem', color: T.textSub, marginTop: '.2rem' }}>
+                    2-layer dense network · TensorFlow.js · trained entirely in-browser · retrains every ~8 s
+                  </div>
+                </div>
+                <MLStatusBadge status={mlStatus} count={transformedHistory.length} />
+              </div>
+
+              <MLForecastPanel
+                predictions={mlPredictions}
+                status={mlStatus}
+                transformedHistory={transformedHistory}
+                isMobile={isMobile}
+              />
+
+              {mlStatus === 'ready' && (
+                <div style={{
+                  display: 'flex', gap: '1.2rem', marginTop: '.9rem',
+                  fontSize: '.72rem', color: T.textSub
+                }}>
+                  <span><span style={{ color: SENSORS[0].color }}>—</span> Actual readings</span>
+                  <span><span style={{ color: T.purple }}>···</span> Neural net prediction</span>
+                  <span style={{ marginLeft: 'auto', color: T.textMuted }}>
+                    Each +step ≈ one sensor cycle (~2 s)
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* ── Section 2: Gemini AI Health Analysis ── */}
+            <GeminiPanel
+              insights={geminiInsights}
+              loading={geminiLoading}
+              error={geminiError}
+              geminiInput={geminiInput}
+              onKeyInput={setGeminiInput}
+              onKeySave={saveGeminiKey}
+              hasKey={!!geminiKey}
+            />
+
+            {/* ── Section 3: How it works ── */}
+            <div style={panelStyle}>
+              <div style={{ fontWeight: 600, fontSize: '.88rem', color: T.text, marginBottom: '.8rem' }}>
+                How the AI works
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '1rem' }}>
+                <div style={{
+                  background: T.bg3, borderRadius: 8, padding: '.85rem 1rem',
+                  borderLeft: `3px solid ${T.purple}`
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: '.82rem', color: T.purple, marginBottom: '.5rem' }}>
+                    🧠 TensorFlow.js Neural Network
+                  </div>
+                  <div style={{ fontSize: '.78rem', color: T.textSub, lineHeight: 1.7 }}>
+                    <div>• Architecture: Dense(16, ReLU) → Dropout(0.1) → Dense(8, ReLU) → Dense(1)</div>
+                    <div>• Trains on a sliding window of 5 readings to predict the next value</div>
+                    <div>• 80 training epochs with Adam optimizer (lr = 0.015)</div>
+                    <div>• Autoregressively predicts 6 steps ahead by feeding predictions back as inputs</div>
+                    <div>• Runs entirely in-browser — no data leaves your device</div>
+                  </div>
+                </div>
+                <div style={{
+                  background: T.bg3, borderRadius: 8, padding: '.85rem 1rem',
+                  borderLeft: `3px solid ${T.cyan}`
+                }}>
+                  <div style={{ fontWeight: 600, fontSize: '.82rem', color: T.cyan, marginBottom: '.5rem' }}>
+                    ✨ Google Gemini 2.0 Flash
+                  </div>
+                  <div style={{ fontSize: '.78rem', color: T.textSub, lineHeight: 1.7 }}>
+                    <div>• Receives all 7 sensor readings + active anomaly messages</div>
+                    <div>• Prompted with Philippine tropical climate context for relevant advice</div>
+                    <div>• Rate-limited: calls only on significant sensor changes (AQI ±10, Nano ±15)</div>
+                    <div>• Returns structured JSON — same format as the rule-based panel</div>
+                    <div>• Free tier at Google AI Studio is sufficient for this use case</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* ════════════════════ ALL SENSORS TAB ══════════════════════════════ */}
         {tab === 'sensors' && (
           <>
             {history.length === 0 ? (
-              <div style={{
-                ...panelStyle, textAlign: 'center', padding: '4rem', color: T.textSub
-              }}>
+              <div style={{ ...panelStyle, textAlign: 'center', padding: '4rem', color: T.textSub }}>
                 <div style={{ fontSize: '2.5rem', marginBottom: '.6rem' }}>📡</div>
                 <div>Waiting for sensor data from ESP32...</div>
               </div>
             ) : (
               <div style={{
                 display: 'grid',
-                gridTemplateColumns: isMobile
-                  ? '1fr'
-                  : 'repeat(auto-fit, minmax(360px, 1fr))',
+                gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fit, minmax(360px, 1fr))',
                 gap: '1rem'
               }}>
                 {SENSORS.map(s => (
@@ -769,7 +1139,14 @@ export default function App() {
                     key={s.key}
                     data={transformedHistory}
                     sensor={s}
-                    forecastPoints={s.key === 'nano_index' ? nanoForecast : []}
+                    forecastPoints={
+                      s.key === 'nano_index'
+                        ? nanoForecast
+                        : (mlStatus === 'ready' && ML_SENSOR_KEYS.includes(s.key))
+                          ? (mlPredictions[s.key] ?? [])
+                          : []
+                    }
+                    forecastLabel={s.key === 'nano_index' ? 'OLS' : 'neural net'}
                   />
                 ))}
               </div>
@@ -777,12 +1154,11 @@ export default function App() {
           </>
         )}
 
-        {/* ══════════ ANALYTICS TAB ═════════════════════════════════════════ */}
+        {/* ════════════════════ ANALYTICS TAB ════════════════════════════════ */}
         {tab === 'analytics' && (
           <>
             <StatsGrid transformedHistory={transformedHistory} />
 
-            {/* Hazard summary */}
             {current && (
               <div style={{ ...panelStyle, marginBottom: '1rem' }}>
                 <div style={{ fontWeight: 600, fontSize: '.88rem', color: T.text, marginBottom: '.7rem' }}>
@@ -797,6 +1173,8 @@ export default function App() {
                     { label: 'AQI Status',    level: aqiLevel?.label,    color: aqiLevel?.color },
                     { label: 'Nano Risk',     level: nanoLevel?.label,   color: nanoLevel?.color },
                     { label: 'Smoke Level',   level: smoke?.label,       color: smoke?.color },
+                    { label: 'Neural Net',    level: mlStatus === 'ready' ? 'Active' : mlStatus === 'training' ? 'Training...' : 'Idle', color: mlStatus === 'ready' ? T.green : mlStatus === 'training' ? T.amber : T.textMuted },
+                    { label: 'Gemini AI',     level: geminiKey ? (geminiInsights ? 'Active' : geminiLoading ? 'Analyzing...' : 'Waiting') : 'No key set', color: (geminiKey && geminiInsights) ? T.green : geminiKey ? T.amber : T.textMuted },
                   ].map((item, i) => item.level ? (
                     <div key={i} style={{
                       background: (item.color ?? T.cyan) + '14',
@@ -815,7 +1193,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Export */}
             <div style={{ display: 'flex', gap: '.8rem', flexWrap: 'wrap' }}>
               <button
                 onClick={downloadCSV}
