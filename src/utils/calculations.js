@@ -254,3 +254,93 @@ export function generateCSV(historyArray) {
   ])
   return [headers, ...rows].map(row => row.join(',')).join('\n')
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  TensorFlow.js Neural Network Prediction
+// ─────────────────────────────────────────────────────────────────────────────
+//  Trains a lightweight 2-hidden-layer dense network on the last N sensor
+//  readings entirely in the browser — no server or cloud training required.
+//
+//  Architecture:
+//    Input (window=5) → Dense(16, ReLU) → Dropout(0.1) → Dense(8, ReLU) → Dense(1)
+//
+//  Usage:  npm install @tensorflow/tfjs
+//  Returns an array of { step, label, value, isForecast } objects,
+//  or [] if TF.js is not installed or there is insufficient data.
+// ─────────────────────────────────────────────────────────────────────────────
+export async function trainAndPredictTF(historyArray, key, steps = 6) {
+  // Dynamic import so the rest of the module loads even without TF.js installed
+  let tf
+  try {
+    const mod = await import('@tensorflow/tfjs')
+    tf = mod.default ?? mod
+  } catch {
+    console.warn('[trainAndPredictTF] @tensorflow/tfjs not found — run: npm install @tensorflow/tfjs')
+    return []
+  }
+
+  if (!historyArray || historyArray.length < 10) return []
+
+  // ── Normalise to [0, 1] ────────────────────────────────────────────────────
+  const raw  = historyArray.map(r => Number(r[key]) || 0)
+  const minV = Math.min(...raw)
+  const maxV = Math.max(...raw)
+  const rng  = maxV - minV || 1
+  const norm = raw.map(v => (v - minV) / rng)
+
+  // ── Build sliding-window pairs (X → y) ────────────────────────────────────
+  const WINDOW = 5
+  const xs = [], ys = []
+  for (let i = 0; i <= norm.length - WINDOW - 1; i++) {
+    xs.push(norm.slice(i, i + WINDOW))
+    ys.push(norm[i + WINDOW])
+  }
+  if (xs.length < 3) return []
+
+  const xT = tf.tensor2d(xs)
+  const yT = tf.tensor1d(ys)
+
+  // ── Model definition ───────────────────────────────────────────────────────
+  const model = tf.sequential({
+    layers: [
+      tf.layers.dense({ inputShape: [WINDOW], units: 16, activation: 'relu' }),
+      tf.layers.dropout({ rate: 0.1 }),
+      tf.layers.dense({ units: 8, activation: 'relu' }),
+      tf.layers.dense({ units: 1 })
+    ]
+  })
+  model.compile({ optimizer: tf.train.adam(0.015), loss: 'meanSquaredError' })
+
+  // ── Training (silent, no UI blocking) ─────────────────────────────────────
+  await model.fit(xT, yT, {
+    epochs:  80,
+    verbose: 0,
+    shuffle: false          // preserve temporal order
+  })
+
+  // ── Autoregressive multi-step prediction ──────────────────────────────────
+  let window  = [...norm.slice(-WINDOW)]
+  const results = []
+
+  for (let i = 0; i < steps; i++) {
+    const inT    = tf.tensor2d([window])
+    const outT   = model.predict(inT)
+    const pNorm  = Math.max(0, Math.min(1, outT.dataSync()[0]))
+    const pVal   = pNorm * rng + minV       // denormalise
+
+    results.push({
+      step:       i + 1,
+      label:      `+${i + 1}`,
+      value:      +Math.max(0, Math.min(500, pVal)).toFixed(1),
+      isForecast: true
+    })
+
+    // Feed prediction back as next input (autoregressive)
+    window = [...window.slice(1), pNorm]
+    tf.dispose([inT, outT])
+  }
+
+  // ── Cleanup ────────────────────────────────────────────────────────────────
+  tf.dispose([xT, yT, model])
+  return results
+}
