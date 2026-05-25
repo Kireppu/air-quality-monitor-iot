@@ -55,7 +55,7 @@ export function adcToCOppm(adc) {
   const R0    = 10.0                         // assumed clean-air R0 in kΩ
   const ratio = Rs / R0
   const ppm   = 99.042 * Math.pow(ratio, -1.518)
-  return Math.max(1, Math.min(10000, ppm)).toFixed(0)
+  return Math.max(0, Math.min(10000, ppm)).toFixed(1)
 }
 
 // ─── Nano Index Prediction ───────────────────────────────────────────────────
