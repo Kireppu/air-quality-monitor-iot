@@ -182,7 +182,7 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const histRef = query(ref(db, 'readings/history'), limitToLast(100))
+    const histRef = query(ref(db, 'readings/history'), limitToLast(500))
     return onValue(histRef, snap => {
       if (snap.exists()) {
         const entries = Object.values(snap.val()).map(r => ({
