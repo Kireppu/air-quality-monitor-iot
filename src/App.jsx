@@ -7,7 +7,7 @@ import { db }                                          from './firebase'
 import * as tf                                         from '@tensorflow/tfjs'
 import {
   ComposedChart, LineChart, Line, XAxis, YAxis,
-  Tooltip, ResponsiveContainer, CartesianGrid
+  Tooltip, ResponsiveContainer, CartesianGrid, Brush
 } from 'recharts'
 import {
   getAQILevel, getNanoLevel, adcToCOppm,
@@ -84,7 +84,9 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
         <span>{sensor.label} <span style={{ color: T.textMuted }}>({sensor.chartUnit})</span></span>
         {forecastPoints.length > 0 && <span style={{ fontSize: '.7rem', color: T.purple }}>— actual &nbsp;··· forecast</span>}
       </div>
-      <ResponsiveContainer width="100%" height={155}>
+      
+      {/* 👇 Height increased to 190px to comfortably fit the zoom slider */}
+      <ResponsiveContainer width="100%" height={190}>
         <ComposedChart data={combined} margin={{ top: 4, right: 4, bottom: 0, left: -10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
           <XAxis dataKey="time" tick={{ fill: T.textMuted, fontSize: 9 }} interval="preserveStartEnd" tickLine={false} />
@@ -92,6 +94,16 @@ function SensorChart({ data, sensor, forecastPoints = [] }) {
           <Tooltip {...TT} />
           <Line type="monotone" dataKey="actual" stroke={sensor.color} strokeWidth={2} dot={false} isAnimationActive={false} connectNulls={false} />
           {forecastPoints.length > 0 && <Line type="monotone" dataKey="forecast" stroke={T.purple} strokeWidth={1.5} strokeDasharray="6 3" dot={false} isAnimationActive={false} connectNulls />}
+          
+          {/* 👇 THE NEW ZOOM & SCROLL SLIDER */}
+          <Brush 
+            dataKey="time" 
+            height={20} 
+            stroke={T.borderBright} 
+            fill={T.bg1} 
+            travellerWidth={14} 
+            tickFormatter={() => ''} 
+          />
         </ComposedChart>
       </ResponsiveContainer>
     </div>
@@ -408,7 +420,7 @@ export default function App() {
               </div>
             </div>
 
-            <div style={{ width: '100%', height: '300px' }}>
+            <div style={{ width: '100%', height: '320px' }}> {/* 👈 Height increased slightly */}
               <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart data={chartData} margin={{ top: 10, right: 10, bottom: 0, left: -20 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
@@ -417,6 +429,15 @@ export default function App() {
                   <Tooltip {...TT} />
                   <Line type="monotone" dataKey="actual" stroke={T.cyan} strokeWidth={2} dot={false} connectNulls={false} name="Actual Nano Index" />
                   <Line type="monotone" dataKey="forecast" stroke={T.purple} strokeWidth={3} strokeDasharray="6 3" dot={false} connectNulls={false} name="AI Prediction" />
+                  
+                  {/* 👇 THE NEW ZOOM & SCROLL SLIDER */}
+                  <Brush 
+                    dataKey="time" 
+                    height={24} 
+                    stroke={T.purple} 
+                    fill={T.bg1} 
+                    travellerWidth={16} 
+                  />
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
