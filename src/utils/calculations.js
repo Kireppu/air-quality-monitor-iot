@@ -69,7 +69,6 @@ export function predictNext(historyArray, key) {
   return { value: Math.max(0, Math.min(500, projected)).toFixed(1), trend, pct: pct.toFixed(1) }
 }
 
-// ─── 24-Hour Timeline Forecast (Fallback when AI is not trained yet) ─────────
 export function forecast24Hours(historyArray, key) {
   if (!historyArray || historyArray.length < 5) return []
 
@@ -81,11 +80,9 @@ export function forecast24Hours(historyArray, key) {
   const lastVal = source[source.length - 1]
 
   return Array.from({ length: 24 }, (_, i) => {
-    // Dampen the slope so it stabilizes over 24h
     const dampedSlope = slope * Math.pow(0.92, i)
     let rawProj = lastVal + (dampedSlope * (i + 1))
     
-    // Add a synthetic daily air quality wave (peaks/valleys)
     const dailyCycle = Math.sin(((i + 1) / 24) * Math.PI * 2) * 5
     const value = rawProj + dailyCycle
 
@@ -134,4 +131,28 @@ export function detectAnomaly(historyArray, key, currentValue) {
   const current  = Number(currentValue) || 0
   const zScore   = stdDev > 0 ? (current - mean) / stdDev : 0
 
-  if (Math.abs(zScore) > 3
+  if (Math.abs(zScore) > 3) return { isAnomaly: true, severity: 'critical', zScore: +zScore.toFixed(1), message: `Extreme spike: ${current.toFixed(0)} (${Math.abs(zScore).toFixed(1)}σ from recent mean ${mean.toFixed(0)})` }
+  if (Math.abs(zScore) > 2) return { isAnomaly: true, severity: 'warning', zScore: +zScore.toFixed(1), message: `Unusual reading: ${current.toFixed(0)} (${Math.abs(zScore).toFixed(1)}σ from recent mean ${mean.toFixed(0)})` }
+  return { isAnomaly: false, zScore: +zScore.toFixed(1) }
+}
+
+export function getSensorStats(historyArray, key) {
+  if (!historyArray || historyArray.length === 0) return null
+  const values = historyArray.map(r => Number(r[key])).filter(v => !isNaN(v) && v >= 0)
+  if (values.length === 0) return null
+  const min = Math.min(...values), max = Math.max(...values), avg = values.reduce((s, v) => s + v, 0) / values.length
+  const mid = Math.floor(values.length / 2)
+  const firstHalfAvg  = values.slice(0, mid).reduce((s, v) => s + v, 0) / (mid || 1)
+  const secondHalfAvg = values.slice(mid).reduce((s, v) => s + v, 0) / ((values.length - mid) || 1)
+  const trendPct      = firstHalfAvg > 0 ? ((secondHalfAvg - firstHalfAvg) / firstHalfAvg) * 100 : 0
+  return { min: +min.toFixed(1), max: +max.toFixed(1), avg: +avg.toFixed(1), trend: trendPct > 3 ? 'rising' : trendPct < -3 ? 'falling' : 'stable', trendPct: +trendPct.toFixed(1) }
+}
+
+export function generateCSV(historyArray) {
+  if (!historyArray || historyArray.length === 0) return ''
+  const headers = ['Timestamp (ISO)', 'AQI', 'Nano Index', 'PM2.5 (µg/m³)', 'Temperature (°C)', 'Humidity (%)', 'CO ADC', 'CO (ppm est.)', 'Smoke ADC', 'Smoke (%)']
+  const rows = historyArray.map(r => [
+    new Date((r.timestamp || 0) * 1000).toISOString(), Math.round(r.aqi || 0), Math.round(r.nano_index || 0), ((r.pm25 || 0) * 1000).toFixed(2), r.temperature || 0, r.humidity || 0, r.co || 0, adcToCOppm(r.co), r.smoke || 0, Math.round(((r.smoke || 0) / 1023) * 100)
+  ])
+  return [headers, ...rows].map(row => row.join(',')).join('\n')
+}
