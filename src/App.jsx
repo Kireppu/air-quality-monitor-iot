@@ -1,12 +1,10 @@
 import { useEffect, useState }          from 'react'
 import { ref, onValue, query, limitToLast } from 'firebase/database'
 import { db }                           from './firebase'
-import {
-  LineChart, Line, XAxis, YAxis,
-  Tooltip, ResponsiveContainer, CartesianGrid
-} from 'recharts'
+import { LineChart, Line, XAxis, YAxis,
+         Tooltip, ResponsiveContainer, CartesianGrid} from 'recharts'
 import { getAQILevel, getNanoLevel, predictNext,
-         rollingAQI, adcToCOppm, getSmokeLevel } from './utils/calculations'
+         adcToCOppm, getSmokeLevel } from './utils/calculations'
 // ─── Metric Card ─────────────────────────────────────────────────────────────
 function MetricCard({ label, value, unit, color }) {
   return (
