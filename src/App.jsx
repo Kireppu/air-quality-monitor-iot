@@ -201,6 +201,9 @@ export default function App() {
   }, [])
 
   // ─── TENSORFLOW.JS TRAINING LOGIC ──────────────────────────────────────────
+  const handleBrushChange = (range) => {
+  setBrushIdx({ start: range.startIndex, end: range.endIndex });
+  
   const trainAIModel = useCallback(async () => {
     if (history.length < 10) return
     setIsTraining(true)
@@ -326,8 +329,6 @@ export default function App() {
     color: tab === id ? T.cyan : T.textSub, fontFamily: 'inherit', transition: 'all .18s', whiteSpace: 'nowrap'
   })
 
-  const handleBrushChange = (range) => {
-  setBrushIdx({ start: range.startIndex, end: range.endIndex });
 
   return (
     <div style={{ minHeight: '100vh', background: T.bg0, color: T.text, fontFamily: '"Outfit", "Segoe UI", sans-serif' }}>
