@@ -159,8 +159,6 @@ export default function App() {
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768)
   const [tab, setTab] = useState('dashboard')
   const [brushIdx, setBrushIdx] = useState({ start: 0, end: undefined });
-  const handleBrushChange = (range) => {
-  setBrushIdx({ start: range.startIndex, end: range.endIndex });
 
   // ML States
   const [tfForecast, setTfForecast] = useState(null)
@@ -327,6 +325,9 @@ export default function App() {
     border: `1px solid ${tab === id ? T.cyan + '55' : 'transparent'}`, background: tab === id ? T.cyan + '18' : 'transparent',
     color: tab === id ? T.cyan : T.textSub, fontFamily: 'inherit', transition: 'all .18s', whiteSpace: 'nowrap'
   })
+
+  const handleBrushChange = (range) => {
+  setBrushIdx({ start: range.startIndex, end: range.endIndex });
 
   return (
     <div style={{ minHeight: '100vh', background: T.bg0, color: T.text, fontFamily: '"Outfit", "Segoe UI", sans-serif' }}>
