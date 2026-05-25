@@ -116,8 +116,7 @@ export default function App() {
   }, [])
 
   // ─── Derived Values ─────────────────────────────────────────────
-  const smoothAQI  = rollingAQI(history)
-  const aqi        = smoothAQI ?? (current ? Math.round(current.aqi) : null)
+  const aqi        = current ? Math.round(current.aqi) : null
   const nano       = current ? Math.round(current.nano_index) : null
   const aqiLevel   = aqi  ? getAQILevel(aqi)  : null
   const nanoLevel  = nano ? getNanoLevel(nano) : null
@@ -174,7 +173,7 @@ export default function App() {
                 Air Quality: {aqiLevel.label}
               </div>
               <div style={{ fontSize: '.85rem', color: '#94a3b8', marginTop: '.15rem' }}>
-                Rolling AQI {aqi} · Nano Index {nano} ({nanoLevel?.label})
+                AQI {aqi} · Nano Index {nano} ({nanoLevel?.label})
               </div>
               {smoke && smoke.pct >= 60 && (
                 <div style={{ fontSize: '.78rem', color: smoke.color, marginTop: '.2rem' }}>
@@ -218,7 +217,7 @@ export default function App() {
           <MetricCard
             label="AQI"
             value={aqi}
-            unit="Rolling average"
+            unit="Air Quality Index"
             color={aqiLevel?.color}
           />
           <MetricCard
