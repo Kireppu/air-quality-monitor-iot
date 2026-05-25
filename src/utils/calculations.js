@@ -30,16 +30,6 @@ export function getNanoLevel(nano) {
   return                   { label: 'Hazardous',    color: '#7c2d12' }
 }
 
-// ─── Rolling Average AQI ─────────────────────────────────────────────────────
-// Averages the last 10 readings to smooth out instantaneous spikes,
-// approximating how standard AQI time-weighted averages work
-export function rollingAQI(historyArray) {
-  if (!historyArray || historyArray.length === 0) return null
-  const last10 = historyArray.slice(-10)
-  const avg    = last10.reduce((sum, r) => sum + (r.aqi || 0), 0) / last10.length
-  return Math.round(avg)
-}
-
 // ─── MQ-7 ADC → CO ppm (approximate) ────────────────────────────────────────
 // Based on MQ-7 datasheet sensitivity curve:
 //   Rs/R0 in clean air ≈ 27.5
